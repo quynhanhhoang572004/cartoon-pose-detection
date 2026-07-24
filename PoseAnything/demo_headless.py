@@ -76,35 +76,77 @@ def transform_keypoints_to_pad_and_resize(keypoints, image_size):
     return trans
 
 
+def _yolo_label_for(img_path):
+    """Ultralytics convention: .../images/... -> .../labels/... , ext -> .txt"""
+    base = os.path.splitext(img_path)[0] + '.txt'
+    parts = base.replace('\\', '/').split('/')
+    if 'images' in parts:
+        parts[len(parts) - 1 - parts[::-1].index('images')] = 'labels'
+    return os.path.normpath('/'.join(parts))
+
+
+def _find_data_yaml(start_path):
+    """Walk up from a label/image path looking for a data.yaml."""
+    d = os.path.dirname(os.path.abspath(start_path))
+    for _ in range(6):
+        cand = os.path.join(d, 'data.yaml')
+        if os.path.exists(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
+def _read_yolo_keypoints(label_path, img_w, img_h):
+    with open(label_path, 'r', encoding='utf-8') as f:
+        line = next(l for l in f if l.strip())  # first instance
+    kpt_vals = list(map(float, line.split()))[5:]  # skip cls + xywh
+    pts = [[kpt_vals[3 * k] * img_w, kpt_vals[3 * k + 1] * img_h]
+           for k in range(len(kpt_vals) // 3)]
+    return torch.tensor(pts).float()
+
+
+def _read_skeleton(data_yaml):
+    import yaml
+    with open(data_yaml, 'r', encoding='utf-8') as f:
+        dy = yaml.safe_load(f)
+    return [tuple(e) for e in dy.get('skeleton', [])]
+
+
 def load_support_keypoints(args, img_w, img_h):
     """Return (kp_orig [K,2] in support-image pixels, skeleton list of tuples).
 
-    Two input modes:
+    Input modes (in priority order):
       --kp        JSON: {"keypoints": [[x,y],...], "skeleton": [[i,j],...]}
-      --kp-yolo   Ultralytics YOLO-pose .txt label (+ --data-yaml for skeleton)
+      --kp-yolo   explicit Ultralytics YOLO-pose .txt label
+      (neither)   AUTO: derive the .txt label from --support path
+                  (images/->labels/) and the skeleton from a nearby data.yaml
     """
-    if args.kp_yolo:
-        import yaml
-        with open(args.kp_yolo, 'r', encoding='utf-8') as f:
-            line = next(l for l in f if l.strip())  # first instance
-        vals = list(map(float, line.split()))
-        kpt_vals = vals[5:]  # skip cls + xywh
-        pts = []
-        for k in range(len(kpt_vals) // 3):
-            px, py, _v = kpt_vals[3 * k:3 * k + 3]
-            pts.append([px * img_w, py * img_h])  # normalized -> pixels
-        kp_orig = torch.tensor(pts).float()
-        skeleton = []
-        if args.data_yaml:
-            with open(args.data_yaml, 'r', encoding='utf-8') as f:
-                dy = yaml.safe_load(f)
-            skeleton = [tuple(e) for e in dy.get('skeleton', [])]
-        return kp_orig, skeleton
+    if args.kp:  # explicit JSON
+        with open(args.kp, 'r', encoding='utf-8') as f:
+            ann = json.load(f)
+        return torch.tensor(ann['keypoints']).float(), \
+            [tuple(e) for e in ann.get('skeleton', [])]
 
-    with open(args.kp, 'r', encoding='utf-8') as f:
-        ann = json.load(f)
-    return torch.tensor(ann['keypoints']).float(), \
-        [tuple(e) for e in ann.get('skeleton', [])]
+    # YOLO label: explicit path, else auto-derived from the support image path
+    label_path = args.kp_yolo or _yolo_label_for(args.support)
+    if not os.path.exists(label_path):
+        raise FileNotFoundError(
+            f'No support keypoints. Looked for YOLO label at:\n  {label_path}\n'
+            f'Either the support image must live under an images/ dir with a '
+            f'matching labels/*.txt, or pass --kp-yolo / --kp explicitly.')
+    print(f'[support kp] reading {label_path}')
+
+    kp_orig = _read_yolo_keypoints(label_path, img_w, img_h)
+    data_yaml = args.data_yaml or _find_data_yaml(label_path)
+    skeleton = _read_skeleton(data_yaml) if data_yaml else []
+    if data_yaml:
+        print(f'[skeleton] from {data_yaml}')
+    else:
+        print('[skeleton] none found (graph refinement runs without edges)')
+    return kp_orig, skeleton
 
 
 def parse_args():
@@ -122,10 +164,7 @@ def parse_args():
     p.add_argument('--device', default='cpu', help='cpu or cuda:0')
     p.add_argument('--fuse-conv-bn', action='store_true')
     p.add_argument('--cfg-options', nargs='+', action=DictAction, default={})
-    args = p.parse_args()
-    if not args.kp and not args.kp_yolo:
-        p.error('provide either --kp (JSON) or --kp-yolo (YOLO label)')
-    return args
+    return p.parse_args()
 
 
 def main():
