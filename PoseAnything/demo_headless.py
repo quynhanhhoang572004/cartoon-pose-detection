@@ -76,18 +76,56 @@ def transform_keypoints_to_pad_and_resize(keypoints, image_size):
     return trans
 
 
+def load_support_keypoints(args, img_w, img_h):
+    """Return (kp_orig [K,2] in support-image pixels, skeleton list of tuples).
+
+    Two input modes:
+      --kp        JSON: {"keypoints": [[x,y],...], "skeleton": [[i,j],...]}
+      --kp-yolo   Ultralytics YOLO-pose .txt label (+ --data-yaml for skeleton)
+    """
+    if args.kp_yolo:
+        import yaml
+        with open(args.kp_yolo, 'r', encoding='utf-8') as f:
+            line = next(l for l in f if l.strip())  # first instance
+        vals = list(map(float, line.split()))
+        kpt_vals = vals[5:]  # skip cls + xywh
+        pts = []
+        for k in range(len(kpt_vals) // 3):
+            px, py, _v = kpt_vals[3 * k:3 * k + 3]
+            pts.append([px * img_w, py * img_h])  # normalized -> pixels
+        kp_orig = torch.tensor(pts).float()
+        skeleton = []
+        if args.data_yaml:
+            with open(args.data_yaml, 'r', encoding='utf-8') as f:
+                dy = yaml.safe_load(f)
+            skeleton = [tuple(e) for e in dy.get('skeleton', [])]
+        return kp_orig, skeleton
+
+    with open(args.kp, 'r', encoding='utf-8') as f:
+        ann = json.load(f)
+    return torch.tensor(ann['keypoints']).float(), \
+        [tuple(e) for e in ann.get('skeleton', [])]
+
+
 def parse_args():
     p = argparse.ArgumentParser(description='Pose Anything Headless Demo')
     p.add_argument('--support', required=True, help='CLEAN support image (no overlay)')
     p.add_argument('--query', required=True)
-    p.add_argument('--kp', required=True, help='JSON with support keypoints (+skeleton)')
+    p.add_argument('--kp', help='JSON with support keypoints (+skeleton)')
+    p.add_argument('--kp-yolo', dest='kp_yolo',
+                   help='YOLO-pose .txt label for the support frame')
+    p.add_argument('--data-yaml', dest='data_yaml',
+                   help='Ultralytics data.yaml (for skeleton, used with --kp-yolo)')
     p.add_argument('--config', required=True)
     p.add_argument('--checkpoint', required=True)
     p.add_argument('--outdir', default='output')
     p.add_argument('--device', default='cpu', help='cpu or cuda:0')
     p.add_argument('--fuse-conv-bn', action='store_true')
     p.add_argument('--cfg-options', nargs='+', action=DictAction, default={})
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.kp and not args.kp_yolo:
+        p.error('provide either --kp (JSON) or --kp-yolo (YOLO label)')
+    return args
 
 
 def main():
@@ -108,10 +146,7 @@ def main():
         raise ValueError('Fail to read images')
     h, w = support_img.shape[:2]
 
-    with open(args.kp, 'r', encoding='utf-8') as f:
-        ann = json.load(f)
-    kp_orig = torch.tensor(ann['keypoints']).float()
-    skeleton = [tuple(e) for e in ann.get('skeleton', [])]
+    kp_orig, skeleton = load_support_keypoints(args, w, h)
     if len(skeleton) == 0:
         skeleton = [(0, 0)]
     # original pixel coords -> 256 padded space (matches demo.py clicking space)
