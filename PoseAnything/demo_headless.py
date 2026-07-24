@@ -154,8 +154,9 @@ def parse_args():
     p.add_argument('--support', required=True, help='CLEAN support image (no overlay)')
     p.add_argument('--query', required=True)
     p.add_argument('--kp', help='JSON with support keypoints (+skeleton)')
-    p.add_argument('--kp-yolo', dest='kp_yolo',
-                   help='YOLO-pose .txt label for the support frame')
+    p.add_argument('--kp-yolo', '--label', dest='kp_yolo',
+                   help='YOLO-pose .txt label file for the support frame '
+                        '(explicit path; overrides auto-derivation)')
     p.add_argument('--data-yaml', dest='data_yaml',
                    help='Ultralytics data.yaml (for skeleton, used with --kp-yolo)')
     p.add_argument('--config', required=True)
