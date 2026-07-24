@@ -1,4 +1,4 @@
-"""Headless version of demo.py — no OpenCV mouse clicking.
+r"""Headless version of demo.py — no OpenCV mouse clicking.
 
 Reads the support keypoints + skeleton from a JSON file, so it can run on a
 server without a display. Everything else mirrors demo.py.
