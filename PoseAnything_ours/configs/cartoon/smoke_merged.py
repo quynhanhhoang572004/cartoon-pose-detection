@@ -14,10 +14,10 @@ NUM_SHOTS = 5
 # all 6 categories have data AFTER merging in Tom & Jerry. If T&J is NOT merged,
 # drop 1,2 -> [3,4,5,6].
 VALID_CLASS_IDS = [1, 2, 3, 4, 5, 6]
-DATA_DIR = '/PATH/TO/merged'   # <-- EDIT: dir holding coco_train.json/coco_val.json + images/
+DATA_DIR = '/home/subnh3/projects/QuynhAnh/cartoon-pose-detection/data/merged'   # <-- EDIT: dir holding coco_train.json/coco_val.json + images/
 
 log_level = 'INFO'
-load_from = 'cartoon_test_ckpt.pth'
+load_from = '/home/subnh3/projects/QuynhAnh/cartoon-pose-detection/PoseAnything/cartoon_test_ckpt.pth'
 resume_from = None
 dist_params = dict(backend='nccl')
 workflow = [('train', 1)]
