@@ -1,6 +1,6 @@
 json_tricks
 numpy
 opencv-python
-pillow==6.2.2
-xtcocotools
+pillow>=10.0.0
+pycocotools
 scipy
