@@ -151,6 +151,15 @@ class PoseHead(nn.Module):
         nn.init.xavier_uniform_(self.query_proj.weight, gain=1)
         nn.init.constant_(self.query_proj.bias, 0)
 
+        # OUR CONTRIBUTION: zero-init the shot scorer so that at start every
+        # shot scores 0 -> softmax is uniform -> aggregation == masked mean.
+        # The new arch therefore BEGINS identical to the pretrained baseline
+        # (minus occluded shots) and only learns to deviate during training.
+        # This stabilizes fine-tuning and makes the old-vs-new A/B clean.
+        if self.keypoint_agg == 'attn':
+            nn.init.constant_(self.shot_attn.weight, 0)
+            nn.init.constant_(self.shot_attn.bias, 0)
+
     # ==================================================================== #
     #  OUR CONTRIBUTION (3/4): the shot-aggregation operator                 #
     #  Replaces PoseAnything's `torch.mean(torch.stack(...), 0)`. This is    #
