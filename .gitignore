@@ -1,0 +1,12 @@
+# Datasets, downloaded videos and extracted frames
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Training artifacts
+work_dirs/
+*.pth
