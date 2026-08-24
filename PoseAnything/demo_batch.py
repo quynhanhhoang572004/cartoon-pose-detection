@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import random
+from collections import Counter
 from pathlib import Path
 
 import cv2
@@ -153,6 +154,8 @@ def parse_args():
     p.add_argument('--num-shots', type=int, default=5, help='K support images per episode')
     p.add_argument('--radius', type=int, default=2, help='keypoint dot radius')
     p.add_argument('--thick', type=int, default=1, help='skeleton line thickness')
+    p.add_argument('--single-only', type=int, default=1,
+                   help='1 = use only single-character frames (avoid Mickey+Minnie)')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--device', default='cuda')
     return p.parse_args()
@@ -204,18 +207,31 @@ def main():
     def n_visible(ann):
         return int((np.array(ann['keypoints']).reshape(-1, 3)[:, 2] > 0).sum())
 
+    img_cnt = Counter(an['image_id'] for an in coco['annotations'])
     K = a.num_shots
     rng = random.Random(a.seed)
     for cat, anns in by_cat.items():
         if len(anns) < K + 1:
             continue
-        # RANDOM support, but drawn from reasonably full-body images (>=15 visible
-        # kpts) so a close-up support doesn't break full-body queries.
-        full = [x for x in anns if n_visible(x) >= 15]
-        pool = full if len(full) >= K + 1 else sorted(anns, key=n_visible, reverse=True)
-        pool = list(pool)
-        rng.shuffle(pool)
-        sup_anns = pool[:K]
+        # candidates: single-instance frames (avoid e.g. Mickey+Minnie in one frame)
+        # + full-body; fall back to most-complete if too few.
+        cands = [x for x in anns
+                 if (not a.single_only or img_cnt[x['image_id']] == 1) and n_visible(x) >= 12]
+        if len(cands) < K + 1:
+            cands = sorted(anns, key=n_visible, reverse=True)
+        cands = list(cands)
+        rng.shuffle(cands)
+        # DIVERSE support via farthest-point sampling over pose (covers pose space,
+        # so more query poses have a nearby support -> helps chars like Bugs).
+        sup_anns = [cands[0]]
+        chosen = {cands[0]['id']}
+        while len(sup_anns) < K:
+            rest = [c for c in cands if c['id'] not in chosen]
+            if not rest:
+                break
+            nxt = max(rest, key=lambda c: min(pose_dist(c, s) for s in sup_anns))
+            sup_anns.append(nxt)
+            chosen.add(nxt['id'])
         sups = [build_one(x) for x in sup_anns]
         s_imgs = [s[0] for s in sups]
         s_tgts = [s[1] for s in sups]
@@ -236,10 +252,9 @@ def main():
         montage = cv2.hconcat(sup_drawn)
         cv2.imwrite(f'{out_dir}/_support_x{K}.png', cv2.cvtColor(montage, cv2.COLOR_RGB2BGR))
 
-        # queries: pick those whose POSE is CLOSEST to the support set (full-body),
-        # so support covers the query pose -> cleaner matching.
-        q_cands = [x for x in pool[K:] if n_visible(x) >= 12] or list(pool[K:])
-        q_pool = sorted(q_cands, key=lambda qq: min(pose_dist(qq, sa) for sa in sup_anns))
+        # queries: closest pose to the (diverse) support set, excluding support.
+        rest = [c for c in cands if c['id'] not in chosen]
+        q_pool = sorted(rest, key=lambda qq: min(pose_dist(qq, sa) for sa in sup_anns))
         for q in q_pool[:a.per_cat]:
             qi = id2img[q['image_id']]
             q_full = cv2.imread(str(Path(a.img_dir) / qi['file_name']))
