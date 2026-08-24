@@ -37,12 +37,13 @@ def char_of(fname):
 
 def draw(img, kpts, vis, radius, thick):
     """Draw only the GT-visible keypoints (the ones PCK actually scores)."""
-    pts = np.array(kpts, dtype=float)          # [21, 3] image-space
+    pts = np.array(kpts, dtype=float)          # model may pad > 21 rows
+    n = min(len(vis), len(pts))                # use only the real 21 keypoints
     for aa, bb in SKELETON:
-        if vis[aa] and vis[bb]:
+        if aa < n and bb < n and vis[aa] and vis[bb]:
             cv2.line(img, (int(pts[aa][0]), int(pts[aa][1])),
                      (int(pts[bb][0]), int(pts[bb][1])), (0, 200, 0), thick, cv2.LINE_AA)
-    for k in range(len(pts)):
+    for k in range(n):
         if vis[k]:
             cv2.circle(img, (int(pts[k][0]), int(pts[k][1])), radius, (0, 0, 255), -1, cv2.LINE_AA)
     return img
