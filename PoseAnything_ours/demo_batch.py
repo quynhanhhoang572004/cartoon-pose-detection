@@ -126,12 +126,17 @@ def main():
         return (img_t, torch.tensor(t).float()[None].to(a.device),
                 torch.tensor(tw).float()[None].to(a.device), kp3d)
 
+    def n_visible(ann):
+        return int((np.array(ann['keypoints']).reshape(-1, 3)[:, 2] > 0).sum())
+
     K = a.num_shots
     for cat, anns in by_cat.items():
         if len(anns) < K + 1:
             continue
-        random.shuffle(anns)
-        sups = [build_one(x) for x in anns[:K]]     # K support images
+        # prefer FULL-BODY support (most visible keypoints) so the support covers
+        # all query keypoints — avoids close-up support failing on legs/feet.
+        anns = sorted(anns, key=n_visible, reverse=True)
+        sups = [build_one(x) for x in anns[:K]]     # K most-complete support images
         s_imgs = [s[0] for s in sups]
         s_tgts = [s[1] for s in sups]
         s_ws = [s[2] for s in sups]
