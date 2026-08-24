@@ -83,6 +83,49 @@ def resize_pad_raw(img_bgr):
     return cv2.resize(img, (256, 256))
 
 
+def crop_char(img_bgr, kp, pad=0.25):
+    """Crop the image to the character's bbox (from visible keypoints) + padding —
+    matches the top-down crop the model was TRAINED on. Returns crop + (ox, oy)."""
+    vis = kp[:, 2] > 0
+    if vis.sum() < 2:
+        return img_bgr, 0, 0
+    xs, ys = kp[vis, 0], kp[vis, 1]
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    bw, bh = x1 - x0, y1 - y0
+    x0 -= bw * pad; x1 += bw * pad
+    y0 -= bh * pad; y1 += bh * pad
+    H, W = img_bgr.shape[:2]
+    x0, y0 = max(0, int(x0)), max(0, int(y0))
+    x1, y1 = min(W, int(x1)), min(H, int(y1))
+    if x1 - x0 < 5 or y1 - y0 < 5:
+        return img_bgr, 0, 0
+    return img_bgr[y0:y1, x0:x1], x0, y0
+
+
+def norm_pose(ann):
+    """Bbox-normalized keypoints [21,2] in [0,1] + visibility, for pose comparison."""
+    kp = np.array(ann['keypoints']).reshape(-1, 3).astype(float)
+    vis = kp[:, 2] > 0
+    if vis.sum() < 2:
+        return None, vis
+    xy = kp[:, :2]
+    x0, y0 = xy[vis, 0].min(), xy[vis, 1].min()
+    s = max(xy[vis, 0].max() - x0, xy[vis, 1].max() - y0) + 1e-6
+    return (xy - np.array([x0, y0])) / s, vis
+
+
+def pose_dist(qa, sa):
+    """Mean L2 between two normalized poses over commonly-visible keypoints."""
+    q, qv = norm_pose(qa)
+    s, sv = norm_pose(sa)
+    if q is None or s is None:
+        return 1e9
+    m = qv & sv
+    if m.sum() < 3:
+        return 1e9
+    return float(np.linalg.norm(q[m] - s[m], axis=1).mean())
+
+
 def draw_pose(img256_rgb, pts, vis, radius, thick):
     """Draw skeleton (green) + keypoints (red) with controllable thickness."""
     im = img256_rgb.copy()
@@ -143,19 +186,20 @@ def main():
     data_cfg['use_different_joint_weights'] = False
 
     def build_one(ann):
-        im_info = id2img[ann['image_id']]
-        img = cv2.imread(str(Path(a.img_dir) / im_info['file_name']))
-        H, W = img.shape[:2]
+        img = cv2.imread(str(Path(a.img_dir) / id2img[ann['image_id']]['file_name']))
         kp = np.array(ann['keypoints']).reshape(-1, 3)  # [21,3] px
+        crop, ox, oy = crop_char(img, kp)               # crop to character bbox
+        ch, cw = crop.shape[:2]
         vis = kp[:, 2] > 0
-        kp_pad = kpts_to_pad(torch.tensor(kp[:, :2]).float(), H, W)
+        kp_c = torch.tensor(kp[:, :2] - np.array([ox, oy])).float()  # kpts in crop coords
+        kp_pad = kpts_to_pad(kp_c, ch, cw)
         kp3d = torch.cat([kp_pad, torch.zeros(kp_pad.shape[0], 1)], -1)
         w = torch.tensor(vis).float()[:, None]
         w3 = torch.cat([w, w, torch.zeros_like(w)], -1)
         t, tw = genHeatMap._msra_generate_target(data_cfg, kp3d.numpy(), w3.numpy(), sigma=1)
-        img_t = preprocess(img).flip(0)[None].to(a.device)
+        img_t = preprocess(crop).flip(0)[None].to(a.device)
         return (img_t, torch.tensor(t).float()[None].to(a.device),
-                torch.tensor(tw).float()[None].to(a.device), kp3d)
+                torch.tensor(tw).float()[None].to(a.device), kp3d, crop)
 
     def n_visible(ann):
         return int((np.array(ann['keypoints']).reshape(-1, 3)[:, 2] > 0).sum())
@@ -177,24 +221,31 @@ def main():
         s_tgts = [s[1] for s in sups]
         s_ws = [s[2] for s in sups]
         s_kps = [s[3] for s in sups]
+        s_crops = [s[4] for s in sups]
         cen = [k[:, :2].mean(0) for k in s_kps]
         scl = [k[:, :2].max(0)[0] - k[:, :2].min(0)[0] for k in s_kps]
         out_dir = str(Path(a.outdir) / id2cat[cat])
         os.makedirs(out_dir, exist_ok=True)
 
-        # save the K support images (GT keypoints) as a montage so you can inspect them
+        # montage of the K cropped support images with GT keypoints
         sup_drawn = []
         for si, sa in enumerate(sup_anns):
-            raw = resize_pad_raw(cv2.imread(str(Path(a.img_dir) / id2img[sa['image_id']]['file_name'])))
+            raw = resize_pad_raw(s_crops[si])
             vis = np.array(sa['keypoints']).reshape(-1, 3)[:, 2] > 0
             sup_drawn.append(draw_pose(raw, s_kps[si][:, :2].numpy(), vis, a.radius, a.thick))
         montage = cv2.hconcat(sup_drawn)
         cv2.imwrite(f'{out_dir}/_support_x{K}.png', cv2.cvtColor(montage, cv2.COLOR_RGB2BGR))
 
-        for q in pool[K:K + a.per_cat]:
+        # queries: pick those whose POSE is CLOSEST to the support set (full-body),
+        # so support covers the query pose -> cleaner matching.
+        q_cands = [x for x in pool[K:] if n_visible(x) >= 12] or list(pool[K:])
+        q_pool = sorted(q_cands, key=lambda qq: min(pose_dist(qq, sa) for sa in sup_anns))
+        for q in q_pool[:a.per_cat]:
             qi = id2img[q['image_id']]
-            q_bgr = cv2.imread(str(Path(a.img_dir) / qi['file_name']))
-            q_t = preprocess(q_bgr).flip(0)[None].to(a.device)
+            q_full = cv2.imread(str(Path(a.img_dir) / qi['file_name']))
+            q_kp = np.array(q['keypoints']).reshape(-1, 3)
+            q_crop, _, _ = crop_char(q_full, q_kp)      # crop query to its character
+            q_t = preprocess(q_crop).flip(0)[None].to(a.device)
             data = {
                 'img_s': s_imgs, 'img_q': q_t,
                 'target_s': s_tgts, 'target_weight_s': s_ws,
@@ -209,7 +260,7 @@ def main():
             with torch.no_grad():
                 out = model(**data)
             pts = np.array(torch.as_tensor(out['points']).squeeze().cpu()).reshape(-1, 2)[:21]
-            raw_q = resize_pad_raw(q_bgr)
+            raw_q = resize_pad_raw(q_crop)
             drawn = draw_pose(raw_q, pts, np.ones(21, bool), a.radius, a.thick)
             cv2.imwrite(f'{out_dir}/{Path(qi["file_name"]).stem}_pred.png',
                         cv2.cvtColor(drawn, cv2.COLOR_RGB2BGR))
