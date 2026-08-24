@@ -211,55 +211,36 @@ def main():
     K = a.num_shots
     rng = random.Random(a.seed)
     for cat, anns in by_cat.items():
-        if len(anns) < K + 1:
-            continue
-        # candidates: single-instance frames (avoid e.g. Mickey+Minnie in one frame)
-        # + full-body; fall back to most-complete if too few.
+        # candidates: single-instance (avoid Mickey+Minnie) + full-body
         cands = [x for x in anns
                  if (not a.single_only or img_cnt[x['image_id']] == 1) and n_visible(x) >= 12]
         if len(cands) < K + 1:
             cands = sorted(anns, key=n_visible, reverse=True)
         cands = list(cands)
-        rng.shuffle(cands)
-        # DIVERSE support via farthest-point sampling over pose (covers pose space,
-        # so more query poses have a nearby support -> helps chars like Bugs).
-        sup_anns = [cands[0]]
-        chosen = {cands[0]['id']}
-        while len(sup_anns) < K:
-            rest = [c for c in cands if c['id'] not in chosen]
-            if not rest:
-                break
-            nxt = max(rest, key=lambda c: min(pose_dist(c, s) for s in sup_anns))
-            sup_anns.append(nxt)
-            chosen.add(nxt['id'])
-        sups = [build_one(x) for x in sup_anns]
-        s_imgs = [s[0] for s in sups]
-        s_tgts = [s[1] for s in sups]
-        s_ws = [s[2] for s in sups]
-        s_kps = [s[3] for s in sups]
-        s_crops = [s[4] for s in sups]
-        cen = [k[:, :2].mean(0) for k in s_kps]
-        scl = [k[:, :2].max(0)[0] - k[:, :2].min(0)[0] for k in s_kps]
+        if len(cands) < K + 1:
+            continue
         out_dir = str(Path(a.outdir) / id2cat[cat])
         os.makedirs(out_dir, exist_ok=True)
 
-        # montage of the K cropped support images with GT keypoints
-        sup_drawn = []
-        for si, sa in enumerate(sup_anns):
-            raw = resize_pad_raw(s_crops[si])
-            vis = np.array(sa['keypoints']).reshape(-1, 3)[:, 2] > 0
-            sup_drawn.append(draw_pose(raw, s_kps[si][:, :2].numpy(), vis, a.radius, a.thick))
-        montage = cv2.hconcat(sup_drawn)
-        cv2.imwrite(f'{out_dir}/_support_x{K}.png', cv2.cvtColor(montage, cv2.COLOR_RGB2BGR))
+        # pick a few queries, then for EACH query select the K support images whose
+        # POSE is CLOSEST to that query -> support tailored to the query.
+        q_choices = list(cands)
+        rng.shuffle(q_choices)
+        for q in q_choices[:a.per_cat]:
+            others = [c for c in cands if c['id'] != q['id']]
+            sup_anns = sorted(others, key=lambda s: pose_dist(q, s))[:K]  # nearest to query
+            sups = [build_one(x) for x in sup_anns]
+            s_imgs = [s[0] for s in sups]
+            s_tgts = [s[1] for s in sups]
+            s_ws = [s[2] for s in sups]
+            s_kps = [s[3] for s in sups]
+            s_crops = [s[4] for s in sups]
+            cen = [k[:, :2].mean(0) for k in s_kps]
+            scl = [k[:, :2].max(0)[0] - k[:, :2].min(0)[0] for k in s_kps]
 
-        # queries: closest pose to the (diverse) support set, excluding support.
-        rest = [c for c in cands if c['id'] not in chosen]
-        q_pool = sorted(rest, key=lambda qq: min(pose_dist(qq, sa) for sa in sup_anns))
-        for q in q_pool[:a.per_cat]:
             qi = id2img[q['image_id']]
             q_full = cv2.imread(str(Path(a.img_dir) / qi['file_name']))
-            q_kp = np.array(q['keypoints']).reshape(-1, 3)
-            q_crop, _, _ = crop_char(q_full, q_kp)      # crop query to its character
+            q_crop, _, _ = crop_char(q_full, np.array(q['keypoints']).reshape(-1, 3))
             q_t = preprocess(q_crop).flip(0)[None].to(a.device)
             data = {
                 'img_s': s_imgs, 'img_q': q_t,
@@ -275,10 +256,20 @@ def main():
             with torch.no_grad():
                 out = model(**data)
             pts = np.array(torch.as_tensor(out['points']).squeeze().cpu()).reshape(-1, 2)[:21]
-            raw_q = resize_pad_raw(q_crop)
-            drawn = draw_pose(raw_q, pts, np.ones(21, bool), a.radius, a.thick)
-            cv2.imwrite(f'{out_dir}/{Path(qi["file_name"]).stem}_pred.png',
-                        cv2.cvtColor(drawn, cv2.COLOR_RGB2BGR))
+            stem = Path(qi['file_name']).stem
+
+            # query prediction
+            drawn = draw_pose(resize_pad_raw(q_crop), pts, np.ones(21, bool), a.radius, a.thick)
+            cv2.imwrite(f'{out_dir}/{stem}_pred.png', cv2.cvtColor(drawn, cv2.COLOR_RGB2BGR))
+
+            # the K nearest-pose support images used for THIS query
+            sup_drawn = []
+            for si, sa in enumerate(sup_anns):
+                vis = np.array(sa['keypoints']).reshape(-1, 3)[:, 2] > 0
+                sup_drawn.append(draw_pose(resize_pad_raw(s_crops[si]),
+                                           s_kps[si][:, :2].numpy(), vis, a.radius, a.thick))
+            cv2.imwrite(f'{out_dir}/{stem}_support.png',
+                        cv2.cvtColor(cv2.hconcat(sup_drawn), cv2.COLOR_RGB2BGR))
             print(f'[{id2cat[cat]}] query={qi["file_name"]} (K={K}) done')
 
     print('DONE ->', a.outdir)
