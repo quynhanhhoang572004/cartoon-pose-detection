@@ -160,7 +160,7 @@ def main():
                 out = model(**data)
             vis_s = s_imgs[0][0].detach().cpu().numpy().transpose(1, 2, 0)
             vis_q = q_t[0].detach().cpu().numpy().transpose(1, 2, 0)
-            plot_results(vis_s, vis_q, s_kps[0], s_ws[0], None, s_ws[0], SKELETON,
+            plot_results(vis_s, vis_q, s_kps[0], s_ws[0][0], None, s_ws[0][0], SKELETON,
                          None, torch.tensor(out['points']).squeeze(0), out_dir=out_dir)
             print(f'[{id2cat[cat]}] query={qi["file_name"]} (K={K}) done')
 
