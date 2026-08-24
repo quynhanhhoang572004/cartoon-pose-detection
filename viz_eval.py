@@ -35,15 +35,15 @@ def char_of(fname):
     return m.group(1) if m else 'other'
 
 
-def draw(img, kpts, radius, thick, score_thr):
-    pts = np.array(kpts, dtype=float)          # [21, 3] image-space, col2 = score
-    ok = pts[:, 2] > score_thr if pts.shape[1] > 2 else np.ones(len(pts), bool)
+def draw(img, kpts, vis, radius, thick):
+    """Draw only the GT-visible keypoints (the ones PCK actually scores)."""
+    pts = np.array(kpts, dtype=float)          # [21, 3] image-space
     for aa, bb in SKELETON:
-        if ok[aa] and ok[bb]:
+        if vis[aa] and vis[bb]:
             cv2.line(img, (int(pts[aa][0]), int(pts[aa][1])),
                      (int(pts[bb][0]), int(pts[bb][1])), (0, 200, 0), thick, cv2.LINE_AA)
     for k in range(len(pts)):
-        if ok[k]:
+        if vis[k]:
             cv2.circle(img, (int(pts[k][0]), int(pts[k][1])), radius, (0, 0, 255), -1, cv2.LINE_AA)
     return img
 
@@ -63,6 +63,13 @@ def main():
     res = json.load(open(a.result))
     coco = json.load(open(a.ann))
     id2name = {im['id']: im['file_name'] for im in coco['images']}
+    # GT visibility per image -> draw only keypoints eval actually scores
+    img2vis = {}
+    for an in coco['annotations']:
+        v = np.array(an['keypoints']).reshape(-1, 3)[:, 2] > 0
+        iid = an['image_id']
+        if iid not in img2vis or v.sum() > img2vis[iid].sum():
+            img2vis[iid] = v
 
     # dedup by image_id (an image may be queried in several episodes), group by character
     seen, by_char = set(), defaultdict(list)
@@ -74,12 +81,12 @@ def main():
         fname = id2name.get(iid)
         if fname is None:
             continue
-        by_char[char_of(fname)].append((fname, r['keypoints']))
+        by_char[char_of(fname)].append((fname, r['keypoints'], iid))
 
     for char, items in by_char.items():
         out_dir = Path(a.out) / char
         out_dir.mkdir(parents=True, exist_ok=True)
-        for fname, kpts in items[:a.per_cat]:
+        for fname, kpts, iid in items[:a.per_cat]:
             img = cv2.imread(str(Path(a.img_dir) / fname))
             if img is None:
                 print('  ! missing', fname)
@@ -88,7 +95,8 @@ def main():
             # thin lines, scaled to image size (so consistent across resolutions)
             r = max(1, round(min(H, W) * 0.006 * a.scale))
             t = max(1, round(min(H, W) * 0.003 * a.scale))
-            drawn = draw(img, kpts, r, t, a.score)
+            vis = img2vis.get(iid, np.ones(len(kpts), bool))
+            drawn = draw(img, kpts, vis, r, t)
             cv2.imwrite(str(out_dir / (Path(fname).stem + '_eval.png')), drawn)
             print(f'[{char}] {fname} done')
     print('DONE ->', a.out)
