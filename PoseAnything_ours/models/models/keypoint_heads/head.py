@@ -73,6 +73,9 @@ class PoseHead(nn.Module):
                  heatmap_loss_weight=2.0,
                  support_order_dropout=-1,
                  keypoint_agg='mean',
+                 with_contrast_loss=False,
+                 contrast_loss_weight=0.1,
+                 contrast_temp=0.1,
                  extra=None,
                  train_cfg=None,
                  test_cfg=None):
@@ -94,6 +97,21 @@ class PoseHead(nn.Module):
         # ============================================================== #
         assert keypoint_agg in ('mean', 'weighted', 'attn')
         self.keypoint_agg = keypoint_agg
+        # ============================================================== #
+        #  OUR CONTRIBUTION (3): keypoint-identity contrastive embedding   #
+        #  (SupCon). All characters share the SAME 21-keypoint layout, so  #
+        #  the keypoint INDEX (0..20) is a cross-character label. SupCon   #
+        #  pulls "keypoint j of character A" toward "keypoint j of         #
+        #  character B" and pushes different keypoint types apart, making  #
+        #  the support embeddings character-invariant -> better transfer   #
+        #  to UNSEEN cartoon characters. Off by default (baseline intact); #
+        #  the loss is computed inside get_loss() from a cache set in      #
+        #  forward(), so pam.py needs no changes.                          #
+        # ============================================================== #
+        self.with_contrast_loss = with_contrast_loss
+        self.contrast_loss_weight = contrast_loss_weight
+        self.contrast_temp = contrast_temp
+        self._contrast_cache = None
         self.positional_encoding = build_positional_encoding(positional_encoding)
         self.encoder_positional_encoding = build_positional_encoding(encoder_positional_encoding)
         self.transformer = build_transformer(transformer)
@@ -251,6 +269,12 @@ class PoseHead(nn.Module):
         #     support_keypoints = torch.mean(torch.stack(query_embed_list, 0), 0)
         # We route it through our selectable, variance-aware aggregator instead.
         support_keypoints = self._aggregate_shots(query_embed_list, shot_energy_list)
+        # OUR CONTRIBUTION (3): stash the aggregated per-keypoint support
+        # embedding [bs, num_kpt, C] + its validity mask for the SupCon loss.
+        # Cached (not returned) so pam.py's forward/predict signatures are
+        # untouched; get_loss() reads and clears it in the same forward pass.
+        if self.with_contrast_loss and self.training:
+            self._contrast_cache = (support_keypoints, mask_s)
         support_keypoints = support_keypoints * mask_s
         support_keypoints = self.query_proj(support_keypoints)
         masks_query = (~mask_s.to(torch.bool)).squeeze(-1)  # True indicating this query matched no actual joints.
@@ -276,6 +300,39 @@ class PoseHead(nn.Module):
             output_kpts.append(layer_outputs_unsig.sigmoid())
 
         return torch.stack(output_kpts, dim=0), initial_proposals, similarity_map
+
+    def supcon_loss(self, emb, mask, temp=0.1):
+        """Supervised contrastive loss (Khosla 2020) over support keypoint
+        embeddings, using the keypoint INDEX as the class label.
+
+        Args:
+            emb  : [bs, num_kpt, C] aggregated per-keypoint support embeddings.
+            mask : [bs, num_kpt, 1] 1 = keypoint present/visible, 0 = pad/occ.
+            temp : softmax temperature (smaller = harder positives).
+        Returns:
+            scalar loss. Same keypoint type across characters -> pulled close;
+            different keypoint types -> pushed apart.
+        """
+        bs, nk, C = emb.shape
+        # label of every slot = its keypoint index (shared layout across chars)
+        labels = torch.arange(nk, device=emb.device)[None].expand(bs, nk)
+        valid = mask.squeeze(-1) > 0                      # [bs, num_kpt]
+        feats = emb[valid]                                # [N, C] drop pad/occ
+        labels = labels[valid]                            # [N]
+        if feats.shape[0] < 2:                            # no pair to contrast
+            return emb.sum() * 0.0                        # keeps graph, =0
+        feats = F.normalize(feats, dim=-1)                # cosine space
+        sim = feats @ feats.t() / temp                    # [N, N] similarities
+        eye = torch.eye(feats.shape[0], dtype=torch.bool, device=emb.device)
+        # positives = same keypoint index, excluding self
+        pos = (labels[:, None] == labels[None, :]) & ~eye
+        sim = sim.masked_fill(eye, -1e9)                  # never compare to self
+        logp = sim - torch.logsumexp(sim, dim=1, keepdim=True)   # log-softmax
+        pos_cnt = pos.sum(1)
+        # mean log-likelihood of the positives for each anchor
+        loss = -(logp * pos).sum(1) / pos_cnt.clamp(min=1)
+        has_pos = pos_cnt > 0                             # skip lonely keypoints
+        return loss[has_pos].mean() if has_pos.any() else emb.sum() * 0.0
 
     def get_loss(self, output, initial_proposals, similarity_map, target, target_heatmap, target_weight, target_sizes):
         # Calculate top-down keypoint loss.
@@ -316,6 +373,15 @@ class PoseHead(nn.Module):
             # normalize the loss for each sample with the number of visible joints
             l1_loss = l1_loss.sum(dim=-1, keepdim=False) / normalizer  # [bs, ]
             losses['l1_loss' + '_layer' + str(idx)] = l1_loss.sum() / bs
+
+        # OUR CONTRIBUTION (3): keypoint-identity SupCon on the support
+        # embeddings cached in forward(). Weighted small so it regularizes the
+        # embedding space without overriding the localization losses above.
+        if self.with_contrast_loss and self._contrast_cache is not None:
+            emb, cmask = self._contrast_cache
+            losses['contrast_loss'] = self.supcon_loss(
+                emb, cmask, self.contrast_temp) * self.contrast_loss_weight
+            self._contrast_cache = None   # clear so it can't leak across steps
 
         return losses
 
