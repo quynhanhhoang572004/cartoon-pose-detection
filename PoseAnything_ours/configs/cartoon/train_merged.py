@@ -18,7 +18,7 @@ NUM_SHOTS = 5
 # it is never sampled for training/eval. No need to edit the COCO json.
 # tom=1 jerry=2 bugs=3 pink=4 sylvester=5.
 VALID_CLASS_IDS = [1, 2, 3, 4, 5]
-DATA_DIR = '/PATH/TO/merged'   # <-- EDIT: dir holding coco_train.json/coco_val.json + images/
+DATA_DIR = '/home/subnh3/projects/QuynhAnh/cartoon-pose-detection/data/merged'
 
 log_level = 'INFO'
 load_from = 'cartoon_test_ckpt.pth'
