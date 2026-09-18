@@ -43,6 +43,7 @@ log_config = dict(interval=10, hooks=[
     dict(type='TextLoggerHook'),
     dict(type='WandbLoggerHook',
          init_kwargs=dict(project='cartoon-cape',
+                          entity='quynhanhhoang572004',
                           name='attn_no_mickey_100ep'),
          by_epoch=False),
 ])
