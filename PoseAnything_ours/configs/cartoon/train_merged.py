@@ -13,7 +13,11 @@
 NUM_SHOTS = 5
 # all 6 categories have data AFTER merging in Tom & Jerry. If T&J is NOT merged,
 # drop 1,2 -> [3,4,5,6].
-VALID_CLASS_IDS = [1, 2, 3, 4, 5, 6]
+# Mickey/Minnie dropped: category 6 (mickey_mouse, which also contains Minnie
+# since they were never distinguished) is simply left OUT of valid_class_ids, so
+# it is never sampled for training/eval. No need to edit the COCO json.
+# tom=1 jerry=2 bugs=3 pink=4 sylvester=5.
+VALID_CLASS_IDS = [1, 2, 3, 4, 5]
 DATA_DIR = '/PATH/TO/merged'   # <-- EDIT: dir holding coco_train.json/coco_val.json + images/
 
 log_level = 'INFO'
@@ -22,14 +26,26 @@ resume_from = None
 dist_params = dict(backend='nccl')
 workflow = [('train', 1)]
 checkpoint_config = dict(interval=10)
-evaluation = dict(interval=10, metric=['PCK', 'AUC', 'EPE'],
-                  key_indicator='PCK', gpu_collect=True, res_folder='')
+# validate on the val split every 5 epochs; save_best keeps the checkpoint with
+# the highest val PCK (guards against late-epoch overfit on the small dataset).
+evaluation = dict(interval=5, metric=['PCK', 'AUC', 'EPE'],
+                  key_indicator='PCK', save_best='PCK',
+                  gpu_collect=True, res_folder='')
 optimizer = dict(type='Adam', lr=1e-5)
 optimizer_config = dict(grad_clip=None)
+# longer schedule: LR drops at 70/90 so the last epochs fine-tune at low LR.
 lr_config = dict(policy='step', warmup='linear', warmup_iters=500,
-                 warmup_ratio=0.001, step=[35, 45])
-total_epochs = 50
-log_config = dict(interval=10, hooks=[dict(type='TextLoggerHook')])
+                 warmup_ratio=0.001, step=[70, 90])
+total_epochs = 100
+# WandB logs train losses AND the val PCK/AUC/EPE from the eval hook.
+# Requires: pip install wandb && wandb login  (comment the hook out to disable).
+log_config = dict(interval=10, hooks=[
+    dict(type='TextLoggerHook'),
+    dict(type='WandbLoggerHook',
+         init_kwargs=dict(project='cartoon-cape',
+                          name='attn_no_mickey_100ep'),
+         by_epoch=False),
+])
 
 channel_cfg = dict(num_output_channels=1, dataset_joints=1,
                    dataset_channel=[[0, ]], inference_channel=[0, ], max_kpt_num=100)
