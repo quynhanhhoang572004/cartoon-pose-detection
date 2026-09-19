@@ -144,10 +144,21 @@ def main():
         out = model(**data)
     pts = np.array(torch.as_tensor(out['points']).squeeze().cpu()).reshape(-1, 2)[:21]
 
-    # draw only the keypoints the support actually defined (visible) — cleaner
-    vmask = vis.astype(bool)
-    q_draw = draw_pose(resize_pad_raw(q_crop), pts, vmask, a.radius, a.thick)
-    s_draw = draw_pose(resize_pad_raw(crop), kp3d[:, :2].numpy(), vmask, a.radius, a.thick)
+    # Support: draw the keypoints it defines. Query: draw only keypoints that are
+    # BOTH defined by the support AND visible in the query GT (if the query is in
+    # --coco) -> hides occluded/undefined points, like viz_eval.
+    smask = vis.astype(bool)
+    qmask = smask.copy()
+    if a.coco:
+        coco = json.load(open(a.coco))
+        qid = {im['file_name']: im['id'] for im in coco['images']}.get(Path(a.query).name)
+        qanns = [an for an in coco['annotations'] if an['image_id'] == qid] if qid else []
+        if qanns:
+            qa = max(qanns, key=lambda an: (np.array(an['keypoints']).reshape(-1, 3)[:, 2] > 0).sum())
+            q_vis = np.array(qa['keypoints']).reshape(-1, 3)[:, 2] > 0
+            qmask = smask & q_vis
+    q_draw = draw_pose(resize_pad_raw(q_crop), pts, qmask, a.radius, a.thick)
+    s_draw = draw_pose(resize_pad_raw(crop), kp3d[:, :2].numpy(), smask, a.radius, a.thick)
 
     stem = Path(a.query).stem
     cv2.imwrite(f'{a.outdir}/{stem}_pred.png', cv2.cvtColor(q_draw, cv2.COLOR_RGB2BGR))
