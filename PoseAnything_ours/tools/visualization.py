@@ -52,7 +52,7 @@ def plot_results(support_img, query_img, support_kp, support_w, query_kp, query_
                 axes.add_artist(patch)
         plt.axis('off')  # command for hiding the axis.
         name = 'support' if id == 0 else 'query'
-        plt.savefig(f'./{out_dir}/{str(name_idx)}_{str(name)}.png', bbox_inches='tight', pad_inches=0)
+        plt.savefig(os.path.join(out_dir, f'{name_idx}_{name}.png'), bbox_inches='tight', pad_inches=0)
         if id == 1:
             plt.show()
         plt.clf()
