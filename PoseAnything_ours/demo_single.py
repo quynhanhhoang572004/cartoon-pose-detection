@@ -37,11 +37,37 @@ from demo_batch import (SKELETON, Resize_Pad, kpts_to_pad, resize_pad_raw,
                         crop_char, draw_pose)
 
 
+def load_support_kp(a):
+    """Return (kp_xy [N,2], vis [N] bool, skeleton). Source priority:
+      --coco  : look the support image's file_name up in a COCO json and use its
+                GT keypoints + the category skeleton (no manual JSON needed).
+      --kp    : {"keypoints":[[x,y],...], "skeleton":[...]}; (0,0) = invisible.
+    """
+    if a.coco:
+        coco = json.load(open(a.coco))
+        base = Path(a.support).name
+        iid = {im['file_name']: im['id'] for im in coco['images']}.get(base)
+        if iid is None:
+            raise SystemExit(f'{base} not found in {a.coco}')
+        # if several instances share the image, take the most-annotated one
+        anns = [an for an in coco['annotations'] if an['image_id'] == iid]
+        ann = max(anns, key=lambda an: (np.array(an['keypoints']).reshape(-1, 3)[:, 2] > 0).sum())
+        arr = np.array(ann['keypoints'], dtype=float).reshape(-1, 3)
+        sk = next(c['skeleton'] for c in coco['categories'] if c['id'] == ann['category_id'])
+        return arr[:, :2], arr[:, 2] > 0, [tuple(e) for e in sk]
+    if a.kp:
+        j = json.load(open(a.kp))
+        kp_xy = np.array(j['keypoints'], dtype=float)
+        return kp_xy, np.abs(kp_xy).sum(1) > 0, [tuple(e) for e in j.get('skeleton', SKELETON)]
+    raise SystemExit('provide --coco (auto-lookup) or --kp (manual JSON)')
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--support', required=True)
     p.add_argument('--query', required=True)
-    p.add_argument('--kp', required=True, help='JSON: {"keypoints":[[x,y],...], "skeleton":[...]}')
+    p.add_argument('--coco', help='COCO json (e.g. coco_val.json) to auto-read support keypoints')
+    p.add_argument('--kp', help='manual JSON: {"keypoints":[[x,y],...], "skeleton":[...]}')
     p.add_argument('--config', required=True)
     p.add_argument('--checkpoint', required=True)
     p.add_argument('--outdir', default='output')
@@ -74,12 +100,10 @@ def main():
     data_cfg['joint_weights'] = None
     data_cfg['use_different_joint_weights'] = False
 
-    # --- support: keypoints from JSON, cropped to its bbox (like training) ---
-    ann = json.load(open(a.kp))
-    kp_xy = np.array(ann['keypoints'], dtype=float)             # [21,2] px
-    vis = (np.abs(kp_xy).sum(1) > 0).astype(float)             # (0,0) => invisible
-    kp_np = np.concatenate([kp_xy, vis[:, None]], 1)           # [21,3]
-    skeleton = [tuple(e) for e in ann.get('skeleton', SKELETON)]
+    # --- support: keypoints from --coco lookup or --kp JSON, cropped to bbox ---
+    kp_xy, vis_b, skeleton = load_support_kp(a)
+    vis = vis_b.astype(float)                                   # [N]
+    kp_np = np.concatenate([kp_xy, vis[:, None]], 1)           # [N,3]
 
     s_img = cv2.imread(a.support)
     crop, ox, oy = crop_char(s_img, kp_np)
