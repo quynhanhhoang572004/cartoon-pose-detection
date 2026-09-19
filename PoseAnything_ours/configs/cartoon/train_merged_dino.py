@@ -13,7 +13,15 @@ _base_ = 'train_merged.py'
 
 # 'dino' (not 'dinov2') -> pam.py loads facebookresearch/dino:main, patch-8.
 # 'dino_vitb8' is 768-dim; image stays 256 (from base) since 256/8 = 32.
-model = dict(pretrained='dino_vitb8')
+# SupCon also enabled here (user saw it help) -> DA backbone + contrib-3 together.
+model = dict(
+    pretrained='dino_vitb8',
+    keypoint_head=dict(
+        with_contrast_loss=True,
+        contrast_loss_weight=0.1,
+        contrast_temp=0.1,
+    ),
+)
 
 log_config = dict(interval=10, hooks=[
     dict(type='TextLoggerHook'),

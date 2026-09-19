@@ -14,7 +14,7 @@ colors = [
 
 
 def plot_results(support_img, query_img, support_kp, support_w, query_kp, query_w, skeleton,
-                 initial_proposals, prediction, radius=3, out_dir='./heatmaps'):
+                 initial_proposals, prediction, radius=2, out_dir='./heatmaps'):
     img_names = [img.split("_")[0] for img in os.listdir(out_dir) if str_is_int(img.split("_")[0])]
     if len(img_names) > 0:
         name_idx = max([int(img_name) for img_name in img_names]) + 1
@@ -48,7 +48,7 @@ def plot_results(support_img, query_img, support_kp, support_w, query_kp, query_
             if w[limb[0]] > 0 and w[limb[1]] > 0:
                 patch = plt.Line2D([kp[limb[0], 0], kp[limb[1], 0]],
                                    [kp[limb[0], 1], kp[limb[1], 1]],
-                                   linewidth=2, color=c, alpha=0.6)
+                                   linewidth=1, color=c, alpha=0.6)
                 axes.add_artist(patch)
         plt.axis('off')  # command for hiding the axis.
         name = 'support' if id == 0 else 'query'
