@@ -487,10 +487,14 @@ class PoseHead(nn.Module):
 
         preds = np.zeros(output.shape)
         for idx in range(output.shape[0]):
-            preds[i] = transform_preds(
-                output[i],
-                c[i],
-                s[i], [W, H],
+            # BUGFIX: was indexing with stale `i` (= batch_size-1) instead of
+            # `idx`, so with test batch_size>1 every query but the last got
+            # preds=(0,0) (keypoints dumped at the corner). Harmless at bs==1
+            # (test.py sets samples_per_gpu=1) but breaks batched inference/demo.
+            preds[idx] = transform_preds(
+                output[idx],
+                c[idx],
+                s[idx], [W, H],
                 use_udp=self.test_cfg.get('use_udp', False))
 
         all_preds = np.zeros((batch_size, preds.shape[1], 3), dtype=np.float32)
