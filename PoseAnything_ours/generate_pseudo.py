@@ -197,7 +197,9 @@ def run_eval(model, pool, prototypes, skeleton, a, preprocess, rng):
     coco = json.load(open(a.eval_coco))
     id2name = {im['id']: im['file_name'] for im in coco['images']}
     anns = [an for an in coco['annotations'] if an['category_id'] == a.category]
-    correct = kept_gtvis = gtvis = 0
+    thrs = [0.05, 0.1, 0.2]
+    correct = {t: 0 for t in thrs}
+    kept_gtvis = gtvis = 0
     for an in anns:
         img = cv2.imread(str(Path(a.eval_img_dir) / id2name[an['image_id']]))
         if img is None:
@@ -212,19 +214,20 @@ def run_eval(model, pool, prototypes, skeleton, a, preprocess, rng):
                 gtvis += 1
                 if visible[k]:
                     kept_gtvis += 1
-                    if np.linalg.norm(pts[k] - gxy[k]) < 0.2 * norm_sz:
-                        correct += 1
-    acc = correct / max(kept_gtvis, 1)
+                    d = np.linalg.norm(pts[k] - gxy[k]) / norm_sz
+                    for t in thrs:
+                        correct[t] += (d < t)
     cov = kept_gtvis / max(gtvis, 1)
-    print('=' * 56)
+    print('=' * 60)
     print(f'[EVAL] pseudo-label quality on {len(anns)} labeled frames')
-    print(f'   pseudo-label accuracy (PCK@0.2 of KEPT keypoints): {acc:.3f}')
-    print(f'   coverage (kept / GT-visible keypoints):            {cov:.3f}')
+    for t in thrs:
+        print(f'   accuracy of KEPT keypoints  PCK@{t:<4}: {correct[t] / max(kept_gtvis, 1):.3f}')
+    print(f'   coverage (kept / GT-visible keypoints): {cov:.3f}')
     print(f'   settings: n_subsets={a.n_subsets} shots={a.shots} eps={a.eps} '
-          f'embedding={a.use_embedding}')
-    print('   -> accuracy >~0.85 = base model is a good teacher; tune eps/emb-thresh '
-          'to trade accuracy vs coverage')
-    print('=' * 56)
+          f'embedding={a.use_embedding} emb_thresh={a.emb_thresh}')
+    print('   -> for self-training to sharpen localization, PCK@0.05 of kept '
+          'labels should also be high (not just @0.2)')
+    print('=' * 60)
 
 
 def main():
