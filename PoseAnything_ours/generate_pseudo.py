@@ -143,19 +143,51 @@ def query_embeddings(model, support_img, q_t, pts_norm):
     return F.normalize(samp[0, :, 0, :].t(), dim=-1)               # [num_kpt, C]
 
 
-def filter_query(model, pool, prototypes, q_t, skeleton, a, rng):
+def bbox_from_pts(pts, W, H, pad=0.3):
+    """Character bbox from predicted keypoints (+padding), clamped to the image."""
+    x0, y0 = pts.min(0)
+    x1, y1 = pts.max(0)
+    bw, bh = x1 - x0, y1 - y0
+    x0, x1 = x0 - bw * pad, x1 + bw * pad
+    y0, y1 = y0 - bh * pad, y1 + bh * pad
+    return (max(0, int(x0)), max(0, int(y0)), min(W, int(x1)), min(H, int(y1)))
+
+
+def filter_query(model, pool, prototypes, q_t, skeleton, a, rng, emb=None):
     """Run the support-ensemble (+ optional embedding) filter on ONE query.
-    Returns (mean_256 [21,2], visible [21] bool)."""
+    Returns (mean_256 [21,2], visible [21] bool). `emb` overrides a.use_embedding."""
+    use_emb = a.use_embedding if emb is None else emb
     eps_px = a.eps * 256.0
     preds = np.stack([predict(model, rng.sample(pool, a.shots), q_t, skeleton, a.device)
                       for _ in range(a.n_subsets)], 0)        # [N, 21, 2]
     mean = preds.mean(0)
     visible = np.linalg.norm(preds - mean[None], axis=2).max(0) < eps_px   # tier 1
-    if a.use_embedding:
+    if use_emb:
         qemb = query_embeddings(model, pool[0]['img'], q_t, mean / 256.0)
         cos = (qemb * prototypes).sum(-1).cpu().numpy()
         visible = visible & ((1.0 - cos) < a.emb_thresh)      # tier 2
     return mean, visible
+
+
+def pseudo_for_frame(model, pool, prototypes, frame, preprocess, skeleton, a, rng):
+    """Full per-frame pipeline. With 2-stage self-crop (default): a rough pass on
+    the whole frame gives a character bbox, then the ensemble runs on the CROP
+    (character fills the frame like at training) -> far better pseudo-labels on
+    raw unlabeled frames. Returns (pts_orig [21,2] in original px, visible [21])."""
+    H, W = frame.shape[:2]
+    x0, y0, crop = 0, 0, frame
+    if not a.single_stage:
+        q0 = preprocess(frame).flip(0)[None].to(a.device)
+        m0, _ = filter_query(model, pool, prototypes, q0, skeleton, a, rng, emb=False)
+        rough = pad_to_orig(m0, H, W)                         # rough keypoints, original px
+        bx0, by0, bx1, by1 = bbox_from_pts(rough, W, H, pad=0.3)
+        if bx1 - bx0 >= 5 and by1 - by0 >= 5:
+            x0, y0, crop = bx0, by0, frame[by0:by1, bx0:bx1]
+    ch, cw = crop.shape[:2]
+    q_t = preprocess(crop).flip(0)[None].to(a.device)
+    mean, visible = filter_query(model, pool, prototypes, q_t, skeleton, a, rng)
+    pts = pad_to_orig(mean, ch, cw) + np.array([x0, y0])      # crop -> original px
+    return pts, visible
 
 
 def run_eval(model, pool, prototypes, skeleton, a, preprocess, rng):
@@ -170,10 +202,7 @@ def run_eval(model, pool, prototypes, skeleton, a, preprocess, rng):
         img = cv2.imread(str(Path(a.eval_img_dir) / id2name[an['image_id']]))
         if img is None:
             continue
-        H, W = img.shape[:2]
-        q_t = preprocess(img).flip(0)[None].to(a.device)
-        mean, visible = filter_query(model, pool, prototypes, q_t, skeleton, a, rng)
-        pts = pad_to_orig(mean, H, W)                          # predicted, original px
+        pts, visible = pseudo_for_frame(model, pool, prototypes, img, preprocess, skeleton, a, rng)
         gt = np.array(an['keypoints']).reshape(-1, 3)
         gxy, gv = gt[:, :2], gt[:, 2] > 0
         bb = an.get('bbox')
@@ -215,6 +244,8 @@ def main():
     ap.add_argument('--eps', type=float, default=0.05,
                     help='agreement radius as a fraction of 256 (0.05 = ~13px)')
     ap.add_argument('--min-visible', type=int, default=8, help='min agreed keypoints to keep a frame')
+    ap.add_argument('--single-stage', action='store_true',
+                    help='disable 2-stage self-crop (pad the whole frame; worse on raw frames)')
     # --- second filter tier: embedding-consistency (uses SupCon embedding) ---
     ap.add_argument('--use-embedding', action='store_true',
                     help='also require the sampled feature to match the keypoint prototype')
@@ -274,17 +305,14 @@ def main():
         if q_img is None:
             continue
         H, W = q_img.shape[:2]
-        q_t = preprocess(q_img).flip(0)[None].to(a.device)
-
-        # support-ensemble (+ optional embedding) filter -> mean coords + visibility
-        mean, visible = filter_query(model, pool, prototypes, q_t, skeleton, a, rng)
+        # 2-stage self-crop + support-ensemble (+ embedding) filter
+        pts_orig, visible = pseudo_for_frame(model, pool, prototypes, q_img,
+                                             preprocess, skeleton, a, rng)
 
         if visible.sum() < a.min_visible:
             skipped += 1
             continue
 
-        # map the agreed points back to ORIGINAL query pixels; drop the rest
-        pts_orig = pad_to_orig(mean, H, W)
         kpts = []
         for k in range(21):
             if visible[k]:
