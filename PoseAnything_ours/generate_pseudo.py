@@ -101,7 +101,8 @@ def predict(model, subset, q_t, skeleton, device):
                        'query_image_file': '', 'sample_image_file': [''] * K}]}
     with torch.no_grad():
         out = model(**data)
-    return np.array(torch.as_tensor(out['points']).squeeze().cpu()).reshape(-1, 2)[:21]
+    pts = np.array(torch.as_tensor(out['points']).squeeze().cpu()).reshape(-1, 2)[:21]
+    return pts * 256.0     # model outputs [0,1] normalized -> convert to 256 pad space
 
 
 # ============================================================================ #
@@ -142,6 +143,61 @@ def query_embeddings(model, support_img, q_t, pts_norm):
     return F.normalize(samp[0, :, 0, :].t(), dim=-1)               # [num_kpt, C]
 
 
+def filter_query(model, pool, prototypes, q_t, skeleton, a, rng):
+    """Run the support-ensemble (+ optional embedding) filter on ONE query.
+    Returns (mean_256 [21,2], visible [21] bool)."""
+    eps_px = a.eps * 256.0
+    preds = np.stack([predict(model, rng.sample(pool, a.shots), q_t, skeleton, a.device)
+                      for _ in range(a.n_subsets)], 0)        # [N, 21, 2]
+    mean = preds.mean(0)
+    visible = np.linalg.norm(preds - mean[None], axis=2).max(0) < eps_px   # tier 1
+    if a.use_embedding:
+        qemb = query_embeddings(model, pool[0]['img'], q_t, mean / 256.0)
+        cos = (qemb * prototypes).sum(-1).cpu().numpy()
+        visible = visible & ((1.0 - cos) < a.emb_thresh)      # tier 2
+    return mean, visible
+
+
+def run_eval(model, pool, prototypes, skeleton, a, preprocess, rng):
+    """Measure pseudo-label QUALITY against a labeled set: of the keypoints the
+    filter KEEPS, how many are correct (PCK@0.2 vs GT), and how many we keep
+    (coverage). Tells you whether the base model is a good enough teacher."""
+    coco = json.load(open(a.eval_coco))
+    id2name = {im['id']: im['file_name'] for im in coco['images']}
+    anns = [an for an in coco['annotations'] if an['category_id'] == a.category]
+    correct = kept_gtvis = gtvis = 0
+    for an in anns:
+        img = cv2.imread(str(Path(a.eval_img_dir) / id2name[an['image_id']]))
+        if img is None:
+            continue
+        H, W = img.shape[:2]
+        q_t = preprocess(img).flip(0)[None].to(a.device)
+        mean, visible = filter_query(model, pool, prototypes, q_t, skeleton, a, rng)
+        pts = pad_to_orig(mean, H, W)                          # predicted, original px
+        gt = np.array(an['keypoints']).reshape(-1, 3)
+        gxy, gv = gt[:, :2], gt[:, 2] > 0
+        bb = an.get('bbox')
+        norm_sz = max(bb[2], bb[3]) if bb else float((gxy[gv].max(0) - gxy[gv].min(0)).max())
+        for k in range(21):
+            if gv[k]:
+                gtvis += 1
+                if visible[k]:
+                    kept_gtvis += 1
+                    if np.linalg.norm(pts[k] - gxy[k]) < 0.2 * norm_sz:
+                        correct += 1
+    acc = correct / max(kept_gtvis, 1)
+    cov = kept_gtvis / max(gtvis, 1)
+    print('=' * 56)
+    print(f'[EVAL] pseudo-label quality on {len(anns)} labeled frames')
+    print(f'   pseudo-label accuracy (PCK@0.2 of KEPT keypoints): {acc:.3f}')
+    print(f'   coverage (kept / GT-visible keypoints):            {cov:.3f}')
+    print(f'   settings: n_subsets={a.n_subsets} shots={a.shots} eps={a.eps} '
+          f'embedding={a.use_embedding}')
+    print('   -> accuracy >~0.85 = base model is a good teacher; tune eps/emb-thresh '
+          'to trade accuracy vs coverage')
+    print('=' * 56)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--config', required=True)
@@ -149,8 +205,11 @@ def main():
     ap.add_argument('--support-coco', required=True, help='COCO json holding the labeled support set')
     ap.add_argument('--support-img-dir', required=True)
     ap.add_argument('--category', type=int, required=True, help='character category id in the COCO')
-    ap.add_argument('--unlabeled-dir', required=True, help='folder of unlabeled query frames')
-    ap.add_argument('--out', required=True, help='output pseudo-label COCO json')
+    ap.add_argument('--unlabeled-dir', help='folder of unlabeled query frames (generate mode)')
+    ap.add_argument('--out', help='output pseudo-label COCO json (generate mode)')
+    # --- EVAL mode: measure pseudo-label quality against a LABELED set ---
+    ap.add_argument('--eval-coco', help='labeled COCO with GT keypoints; enables EVAL mode')
+    ap.add_argument('--eval-img-dir', help='images dir for --eval-coco')
     ap.add_argument('--n-subsets', type=int, default=3, help='N independent support subsets to cross-check')
     ap.add_argument('--shots', type=int, default=5, help='support images per subset')
     ap.add_argument('--eps', type=float, default=0.05,
@@ -165,7 +224,6 @@ def main():
     ap.add_argument('--device', default='cuda:0')
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    eps_px = a.eps * 256.0
 
     cfg = Config.fromfile(a.config)
     imgsz = cfg.model.encoder_config.img_size
@@ -198,6 +256,15 @@ def main():
         prototypes = compute_prototypes(model, pool)
         print(f'[embedding] prototypes ready: {tuple(prototypes.shape)}')
 
+    # EVAL MODE: measure pseudo-label quality against a labeled set, then stop
+    if a.eval_coco:
+        if not a.eval_img_dir:
+            raise SystemExit('--eval-coco needs --eval-img-dir')
+        run_eval(model, pool, prototypes, skeleton, a, preprocess, rng)
+        return
+
+    if not a.unlabeled_dir or not a.out:
+        raise SystemExit('generate mode needs --unlabeled-dir and --out')
     frames = sorted(p for ext in ('*.jpg', '*.png') for p in Path(a.unlabeled_dir).glob(ext))
     out_images, out_anns = [], []
     iid = aid = 1
@@ -209,25 +276,8 @@ def main():
         H, W = q_img.shape[:2]
         q_t = preprocess(q_img).flip(0)[None].to(a.device)
 
-        # --- SUPPORT-ENSEMBLE: predict with N different support subsets ---
-        preds = []
-        for _ in range(a.n_subsets):
-            subset = rng.sample(pool, a.shots)
-            preds.append(predict(model, subset, q_t, skeleton, a.device))
-        preds = np.stack(preds, 0)                    # [N, 21, 2] in 256 space
-
-        # --- AGREEMENT FILTER: keep a keypoint only if the subsets agree ---
-        mean = preds.mean(0)                           # [21, 2]
-        spread = np.linalg.norm(preds - mean[None], axis=2).max(0)   # [21] worst deviation
-        visible = spread < eps_px                      # tier 1: subsets agree -> trust
-
-        # --- tier 2: embedding-consistency (semantic) ---
-        if a.use_embedding:
-            pts_norm = mean / 256.0                    # predicted coords in [0,1]
-            qemb = query_embeddings(model, pool[0]['img'], q_t, pts_norm)   # [21, C]
-            cos = (qemb * prototypes).sum(-1).cpu().numpy()   # cosine sim to each prototype
-            emb_ok = (1.0 - cos) < a.emb_thresh        # embedding matches the keypoint TYPE
-            visible = visible & emb_ok                 # keep only if BOTH tiers pass
+        # support-ensemble (+ optional embedding) filter -> mean coords + visibility
+        mean, visible = filter_query(model, pool, prototypes, q_t, skeleton, a, rng)
 
         if visible.sum() < a.min_visible:
             skipped += 1
