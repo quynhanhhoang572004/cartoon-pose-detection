@@ -31,6 +31,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from mmcv import Config
 from mmcv.runner import load_checkpoint
 from mmpose.models import build_posenet
@@ -103,6 +104,44 @@ def predict(model, subset, q_t, skeleton, device):
     return np.array(torch.as_tensor(out['points']).squeeze().cpu()).reshape(-1, 2)[:21]
 
 
+# ============================================================================ #
+#  EMBEDDING-CONSISTENCY (uses the SupCon-shaped keypoint embedding).           #
+#  A pseudo-label at (x,y) is trusted only if the feature sampled there looks   #
+#  like that keypoint TYPE, i.e. is close to the type's prototype (mean support #
+#  embedding). This is the SEMANTIC check that complements support-invariance   #
+#  (a confident-but-misplaced point is stable across supports but its embedding #
+#  does NOT match its keypoint type -> caught here). NEEDS a shakeout run.      #
+# ============================================================================ #
+def compute_prototypes(model, pool):
+    """Mean per-keypoint embedding over the labeled support pool -> [num_kpt, C].
+    Replicates PoseHead's support-token extraction (heatmap-weighted feature)."""
+    acc = wsum = None
+    for e in pool:
+        with torch.no_grad():
+            _, fs = model.extract_features([e['img']], e['img'])   # feature_s
+        feat = fs[0]                                               # [1, C, fh, fw]
+        tgt = e['tgt']                                             # [1, num_kpt, sh, sw]
+        feat_r = F.interpolate(feat, size=tgt.shape[-2:], mode='bilinear', align_corners=False)
+        t = tgt / (tgt.flatten(2).sum(-1)[..., None, None] + 1e-8)
+        emb = t.flatten(2) @ feat_r.flatten(2).permute(0, 2, 1)    # [1, num_kpt, C]
+        vis = (e['w'] > 0).float()                                 # [1, num_kpt, 1] visible mask
+        acc = emb * vis if acc is None else acc + emb * vis
+        wsum = vis if wsum is None else wsum + vis
+    proto = (acc / (wsum + 1e-8)).squeeze(0)                       # [num_kpt, C]
+    return F.normalize(proto, dim=-1)
+
+
+def query_embeddings(model, support_img, q_t, pts_norm):
+    """Sample the query feature map at the predicted [0,1] keypoint coords.
+    Returns L2-normalized [num_kpt, C]."""
+    with torch.no_grad():
+        feat_q, _ = model.extract_features([support_img], q_t)     # [1, C, h, w]
+    grid = torch.tensor(pts_norm, dtype=torch.float32) * 2.0 - 1.0  # [num_kpt, 2] in [-1,1]
+    grid = grid[None, None].to(feat_q.device)                      # [1, 1, num_kpt, 2]
+    samp = F.grid_sample(feat_q, grid, align_corners=False)        # [1, C, 1, num_kpt]
+    return F.normalize(samp[0, :, 0, :].t(), dim=-1)               # [num_kpt, C]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--config', required=True)
@@ -117,6 +156,11 @@ def main():
     ap.add_argument('--eps', type=float, default=0.05,
                     help='agreement radius as a fraction of 256 (0.05 = ~13px)')
     ap.add_argument('--min-visible', type=int, default=8, help='min agreed keypoints to keep a frame')
+    # --- second filter tier: embedding-consistency (uses SupCon embedding) ---
+    ap.add_argument('--use-embedding', action='store_true',
+                    help='also require the sampled feature to match the keypoint prototype')
+    ap.add_argument('--emb-thresh', type=float, default=0.3,
+                    help='max cosine DISTANCE (1-cos) between a point and its keypoint prototype')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='cuda:0')
     a = ap.parse_args()
@@ -149,6 +193,11 @@ def main():
     pool = build_support_pool(anns, a.support_img_dir, gen, data_cfg, preprocess, a.device)
     skeleton = next(c['skeleton'] for c in coco['categories'] if c['id'] == a.category)
 
+    prototypes = None
+    if a.use_embedding:                     # [num_kpt, C] mean support embedding per keypoint
+        prototypes = compute_prototypes(model, pool)
+        print(f'[embedding] prototypes ready: {tuple(prototypes.shape)}')
+
     frames = sorted(p for ext in ('*.jpg', '*.png') for p in Path(a.unlabeled_dir).glob(ext))
     out_images, out_anns = [], []
     iid = aid = 1
@@ -170,7 +219,16 @@ def main():
         # --- AGREEMENT FILTER: keep a keypoint only if the subsets agree ---
         mean = preds.mean(0)                           # [21, 2]
         spread = np.linalg.norm(preds - mean[None], axis=2).max(0)   # [21] worst deviation
-        visible = spread < eps_px                      # True = subsets agree -> trust
+        visible = spread < eps_px                      # tier 1: subsets agree -> trust
+
+        # --- tier 2: embedding-consistency (semantic) ---
+        if a.use_embedding:
+            pts_norm = mean / 256.0                    # predicted coords in [0,1]
+            qemb = query_embeddings(model, pool[0]['img'], q_t, pts_norm)   # [21, C]
+            cos = (qemb * prototypes).sum(-1).cpu().numpy()   # cosine sim to each prototype
+            emb_ok = (1.0 - cos) < a.emb_thresh        # embedding matches the keypoint TYPE
+            visible = visible & emb_ok                 # keep only if BOTH tiers pass
+
         if visible.sum() < a.min_visible:
             skipped += 1
             continue
