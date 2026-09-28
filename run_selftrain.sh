@@ -24,6 +24,10 @@ declare -A CATS=( [bugs_bunny]=3 [pink_panther]=4 [sylvester]=5 )   # name -> ca
 cd "$OURS"
 python setup.py develop
 
+# the config's WandB hook uses an entity that 404s; keep runs offline (sync later
+# with `wandb sync`), or comment the WandbLoggerHook out of the config.
+export WANDB_MODE=offline
+
 # One flat image dir holding the labeled images AND the unlabeled frames, so a
 # single img_prefix resolves every file_name in the merged COCO. Built once.
 IMGDIR=$ROOT/data/selftrain_images
