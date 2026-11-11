@@ -39,6 +39,7 @@ EXPECTED_ORDER = [
 CHARACTER_TO_CLASS = {
     "tom": 0, "jerry": 1,
     "bugs_bunny": 2, "pink_panther": 3, "sylvester": 4, "mickey_mouse": 5,
+    "goofy": 6,
 }
 # names list ordered by id (index == class id)
 NAMES = [c for c, _ in sorted(CHARACTER_TO_CLASS.items(), key=lambda kv: kv[1])]
