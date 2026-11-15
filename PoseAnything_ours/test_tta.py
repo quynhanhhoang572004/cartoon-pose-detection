@@ -116,15 +116,36 @@ def episode(pool, q_idx, sup_idx, skeleton):
             'query_image_file': '', 'sample_image_file': [''] * K}]}
 
 
+def pool_loss(model, pool, skeleton, a):
+    """Mean loss over ALL K leave-one-out episodes, no gradient.
+
+    The per-step losses inside adapt() are each measured on a DIFFERENT held-out
+    shot, so comparing the first to the last says nothing. This averages over the
+    same K episodes every time, so before/after are comparable.
+    """
+    K = len(pool)
+    tot = 0.0
+    with torch.no_grad():
+        for q_idx in range(K):
+            sup_idx = [j for j in range(K) if j != q_idx]
+            losses = model(**episode(pool, q_idx, sup_idx, skeleton))
+            tot += float(sum(v for k, v in losses.items() if 'loss' in k))
+    return tot / max(K, 1)
+
+
 def adapt(model, pool, skeleton, a):
     """Take --steps supervised gradient steps on the support set alone.
 
     The query cycles through the shots, so with --steps == --shots every shot is
-    used exactly once. Returns the per-step loss for logging.
+    used exactly once. Returns (loss_before, loss_after) measured on the same
+    full set of leave-one-out episodes.
     """
     params = select_params(model, a.mode)
     opt = torch.optim.Adam(params, lr=a.lr)
     K = len(pool)
+    before = pool_loss(model, pool, skeleton, a)
+    for p in params:
+        p.requires_grad_(True)
     history = []
     for step in range(a.steps):
         q_idx = step % K
@@ -139,7 +160,8 @@ def adapt(model, pool, skeleton, a):
         history.append(float(loss))
     for p in model.parameters():          # leave the model in a clean eval state
         p.requires_grad_(False)
-    return history
+    after = pool_loss(model, pool, skeleton, a)
+    return before, after
 
 
 # --------------------------------------------------------------------------- #
@@ -249,11 +271,11 @@ def main():
             continue
 
         base_pck, base_epe, n = evaluate(model, pool, qry_anns, skeleton, a, preprocess)
-        hist = adapt(model, pool, skeleton, a)
+        l_before, l_after = adapt(model, pool, skeleton, a)
         tta_pck, tta_epe, _ = evaluate(model, pool, qry_anns, skeleton, a, preprocess)
         model.load_state_dict(snapshot)        # reset: next character starts clean
 
-        print(f'  trial {trial}: n={n} kpts | loss {hist[0]:.4f} -> {hist[-1]:.4f} | '
+        print(f'  trial {trial}: n={n} kpts | LOO loss {l_before:.4f} -> {l_after:.4f} | '
               f'PCK@0.05 {base_pck[0.05]:.3f} -> {tta_pck[0.05]:.3f} | '
               f'EPE {base_epe:.1f} -> {tta_epe:.1f}')
         for t in THRS:

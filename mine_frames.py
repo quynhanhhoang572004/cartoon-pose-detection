@@ -38,7 +38,7 @@ def download(url, workdir):
     # formats under the SABR experiment; forcing these clients restores format 18
     # (360p combined), which is plenty for cartoon pose frames.
     subprocess.run([
-        'yt-dlp',
+        'yt-dlp', '--no-playlist',   # a "watch?v=...&list=..." link is ONE video
         '--extractor-args', 'youtube:player_client=tv,ios,web,android',
         '-f', '18/best[height<=720]/best',
         '--merge-output-format', 'mp4', '-o', out, url], check=True)

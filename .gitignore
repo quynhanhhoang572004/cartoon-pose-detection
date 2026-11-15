@@ -10,3 +10,17 @@ __pycache__/
 # Training artifacts
 work_dirs/
 *.pth
+
+# ---- large artifacts: never commit ----
+server_data/
+*.pt
+*.onnx
+*.engine
+
+# ---- mined / extracted frames (examples/ stay tracked) ----
+*_batch*/
+**/unlabeled/
+**/frames/
+/*.jpg
+/*.jpeg
+/*.png
