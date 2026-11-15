@@ -332,16 +332,30 @@ def main():
         raise SystemExit('no trial completed')
 
     mean = lambda v: sum(v) / len(v)
+    # 5-shot results swing a lot between support draws, so a bare mean over a
+    # handful of trials is not reportable -- carry the spread with it.
+    std = lambda v: float(np.std(v))
     print('=' * 68)
     print(f'[TTA] category {a.category} | mode={a.mode} steps={a.steps} lr={a.lr} '
           f'shots={a.shots} | mean over {len(agg["base_epe"])} trials')
-    print(f'{"metric":<14}{"no TTA":>10}{"with TTA":>11}{"delta":>10}{"unmasked":>12}')
+    print(f'{"metric":<12}{"no TTA":>14}{"with TTA":>15}{"delta":>18}{"unmasked":>11}')
     for t in THRS:
-        b, s, u = mean(agg['base'][t]), mean(agg['tta'][t]), mean(agg['base_all'][t])
-        print(f'{"PCK@" + str(t):<14}{b:>10.3f}{s:>11.3f}{s - b:>+10.3f}{u:>12.3f}')
-    b, s = mean(agg['base_epe']), mean(agg['tta_epe'])
-    u = mean(agg['base_all_epe'])
-    print(f'{"EPE (px)":<14}{b:>10.2f}{s:>11.2f}{s - b:>+10.2f}{u:>12.2f}   (lower is better)')
+        bv, sv = agg['base'][t], agg['tta'][t]
+        dv = [s - b for b, s in zip(bv, sv)]        # paired: same support draw
+        print(f'{"PCK@" + str(t):<12}'
+              f'{mean(bv):>8.3f}+-{std(bv):<4.3f}'
+              f'{mean(sv):>9.3f}+-{std(sv):<4.3f}'
+              f'{mean(dv):>+12.3f}+-{std(dv):<4.3f}'
+              f'{mean(agg["base_all"][t]):>11.3f}')
+    bv, sv = agg['base_epe'], agg['tta_epe']
+    dv = [s - b for b, s in zip(bv, sv)]
+    print(f'{"EPE (px)":<12}'
+          f'{mean(bv):>8.2f}+-{std(bv):<4.2f}'
+          f'{mean(sv):>9.2f}+-{std(sv):<4.2f}'
+          f'{mean(dv):>+12.2f}+-{std(dv):<4.2f}'
+          f'{mean(agg["base_all_epe"]):>11.2f}   (lower is better)')
+    print('delta is PAIRED (same support draw before/after), so its spread is the')
+    print('one that matters -- the base/TTA spreads mostly reflect which 5 shots fell out.')
     print('=' * 68)
     print('Scored joints are those visible in the query AND in every support shot,')
     print('matching the training-time evaluator; "unmasked" scores every GT-visible')
