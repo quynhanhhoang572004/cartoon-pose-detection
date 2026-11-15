@@ -170,12 +170,35 @@ def adapt(model, pool, skeleton, a):
 THRS = (0.05, 0.1, 0.2)
 
 
+def support_visible(pool):
+    """Keypoints the model can actually predict: visible in EVERY support image.
+
+    PoseAnything zeroes a support keypoint's embedding and masks it out of
+    attention when any shot does not show it (head.py: support_keypoints *
+    mask_s), so the coordinate it still emits for that slot is meaningless.
+    pam.py builds mask_s as the product of all target_weight_s, and the
+    training-time evaluator masks the same way (transformer_base_dataset.py:
+    mask_sample is ANDed over the pair). Scoring those slots punishes the model
+    for something it was never given.
+    """
+    m = np.ones(NUM_KPT, dtype=bool)
+    for e in pool:
+        m &= e['w'][0, :, 0].detach().cpu().numpy() > 0
+    return m
+
+
 def evaluate(model, pool, queries, skeleton, a, preprocess):
     """Crop each query to its GT character bbox (as training does), predict with
-    the full support set, compare in ORIGINAL image pixels."""
+    the full support set, compare in ORIGINAL image pixels.
+
+    Returns the support-masked metrics (comparable to the training-time PCK) and,
+    alongside, the unmasked ones over every GT-visible keypoint.
+    """
     correct = {t: 0 for t in THRS}
-    n = 0
-    epe = 0.0
+    correct_all = {t: 0 for t in THRS}
+    n = n_all = 0
+    epe = epe_all = 0.0
+    sup_vis = support_visible(pool) if not a.score_all_kpts else np.ones(NUM_KPT, bool)
     for an in queries:
         img = cv2.imread(str(Path(a.img_dir) / an['file_name']))
         if img is None:
@@ -195,13 +218,23 @@ def evaluate(model, pool, queries, skeleton, a, preprocess):
         bb = an.get('bbox')
         norm_sz = max(bb[2], bb[3]) if bb else float((gxy[gv].max(0) - gxy[gv].min(0)).max())
         for k in range(NUM_KPT):
-            if gv[k]:
-                d = float(np.linalg.norm(pts[k] - gxy[k]))
-                n += 1
-                epe += d
-                for t in THRS:
-                    correct[t] += (d / norm_sz < t)
-    return ({t: correct[t] / max(n, 1) for t in THRS}, epe / max(n, 1), n)
+            if not gv[k]:
+                continue
+            d = float(np.linalg.norm(pts[k] - gxy[k]))
+            n_all += 1
+            epe_all += d
+            for t in THRS:
+                correct_all[t] += (d / norm_sz < t)
+            if not sup_vis[k]:
+                continue                       # model was never shown this joint
+            n += 1
+            epe += d
+            for t in THRS:
+                correct[t] += (d / norm_sz < t)
+    masked = ({t: correct[t] / max(n, 1) for t in THRS}, epe / max(n, 1), n)
+    unmasked = ({t: correct_all[t] / max(n_all, 1) for t in THRS},
+                epe_all / max(n_all, 1), n_all)
+    return masked, unmasked
 
 
 def main():
@@ -222,6 +255,10 @@ def main():
                     help='cap the support size inside leave-one-out episodes (0 = use all shots-1)')
     ap.add_argument('--trials', type=int, default=3,
                     help='random support/query splits to average (5-shot results swing a lot)')
+    ap.add_argument('--score-all-kpts', action='store_true',
+                    help='also score joints missing from some support shot, which '
+                         'the model cannot predict (off by default, matching the '
+                         'training-time evaluator)')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='cuda:0')
     a = ap.parse_args()
@@ -255,7 +292,8 @@ def main():
           f'-> {a.shots} support / {len(anns) - a.shots} query per trial')
 
     agg = {'base': {t: [] for t in THRS}, 'tta': {t: [] for t in THRS},
-           'base_epe': [], 'tta_epe': []}
+           'base_epe': [], 'tta_epe': [],
+           'base_all': {t: [] for t in THRS}, 'base_all_epe': []}
 
     for trial in range(a.trials):
         rng = random.Random(a.seed + trial)
@@ -270,19 +308,25 @@ def main():
             print(f'  trial {trial}: only {len(pool)} support images readable, skipped')
             continue
 
-        base_pck, base_epe, n = evaluate(model, pool, qry_anns, skeleton, a, preprocess)
+        (base_pck, base_epe, n), (all_pck, all_epe, n_all) = \
+            evaluate(model, pool, qry_anns, skeleton, a, preprocess)
         l_before, l_after = adapt(model, pool, skeleton, a)
-        tta_pck, tta_epe, _ = evaluate(model, pool, qry_anns, skeleton, a, preprocess)
+        (tta_pck, tta_epe, _), _ = evaluate(model, pool, qry_anns, skeleton, a, preprocess)
         model.load_state_dict(snapshot)        # reset: next character starts clean
 
-        print(f'  trial {trial}: n={n} kpts | LOO loss {l_before:.4f} -> {l_after:.4f} | '
+        n_sup = int(support_visible(pool).sum())
+        print(f'  trial {trial}: {n_sup}/{NUM_KPT} joints visible in all {len(pool)} shots'
+              f' -> n={n} scored ({n_all} if unmasked) | '
+              f'LOO loss {l_before:.4f} -> {l_after:.4f} | '
               f'PCK@0.05 {base_pck[0.05]:.3f} -> {tta_pck[0.05]:.3f} | '
               f'EPE {base_epe:.1f} -> {tta_epe:.1f}')
         for t in THRS:
             agg['base'][t].append(base_pck[t])
             agg['tta'][t].append(tta_pck[t])
+            agg['base_all'][t].append(all_pck[t])
         agg['base_epe'].append(base_epe)
         agg['tta_epe'].append(tta_epe)
+        agg['base_all_epe'].append(all_epe)
 
     if not agg['base_epe']:
         raise SystemExit('no trial completed')
@@ -291,13 +335,17 @@ def main():
     print('=' * 68)
     print(f'[TTA] category {a.category} | mode={a.mode} steps={a.steps} lr={a.lr} '
           f'shots={a.shots} | mean over {len(agg["base_epe"])} trials')
-    print(f'{"metric":<14}{"no TTA":>10}{"with TTA":>11}{"delta":>10}')
+    print(f'{"metric":<14}{"no TTA":>10}{"with TTA":>11}{"delta":>10}{"unmasked":>12}')
     for t in THRS:
-        b, s = mean(agg['base'][t]), mean(agg['tta'][t])
-        print(f'{"PCK@" + str(t):<14}{b:>10.3f}{s:>11.3f}{s - b:>+10.3f}')
+        b, s, u = mean(agg['base'][t]), mean(agg['tta'][t]), mean(agg['base_all'][t])
+        print(f'{"PCK@" + str(t):<14}{b:>10.3f}{s:>11.3f}{s - b:>+10.3f}{u:>12.3f}')
     b, s = mean(agg['base_epe']), mean(agg['tta_epe'])
-    print(f'{"EPE (px)":<14}{b:>10.2f}{s:>11.2f}{s - b:>+10.2f}   (lower is better)')
+    u = mean(agg['base_all_epe'])
+    print(f'{"EPE (px)":<14}{b:>10.2f}{s:>11.2f}{s - b:>+10.2f}{u:>12.2f}   (lower is better)')
     print('=' * 68)
+    print('Scored joints are those visible in the query AND in every support shot,')
+    print('matching the training-time evaluator; "unmasked" scores every GT-visible')
+    print('joint, including ones the model was never shown and cannot predict.')
     print('Support set is LABELED target-domain data available at test time; only')
     print(f'{a.mode} params moved, {a.steps} steps, weights reset after each trial.')
 
