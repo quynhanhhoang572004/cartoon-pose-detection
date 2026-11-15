@@ -255,6 +255,10 @@ def main():
                     help='cap the support size inside leave-one-out episodes (0 = use all shots-1)')
     ap.add_argument('--trials', type=int, default=3,
                     help='random support/query splits to average (5-shot results swing a lot)')
+    ap.add_argument('--save-adapted', metavar='PATH',
+                    help="save trial 0's adapted weights, so generate_pseudo.py "
+                         'can pseudo-label with the adapted teacher instead of '
+                         'the base one (use the matching support json)')
     ap.add_argument('--score-all-kpts', action='store_true',
                     help='also score joints missing from some support shot, which '
                          'the model cannot predict (off by default, matching the '
@@ -312,6 +316,20 @@ def main():
             evaluate(model, pool, qry_anns, skeleton, a, preprocess)
         l_before, l_after = adapt(model, pool, skeleton, a)
         (tta_pck, tta_epe, _), _ = evaluate(model, pool, qry_anns, skeleton, a, preprocess)
+        if a.save_adapted and trial == 0:
+            # Keep trial 0's adapted weights so generate_pseudo.py can teach with
+            # them. Trial 0 draws its support with Random(seed) over the same
+            # annotation order, so it IS the split written by split_goofy.py --
+            # pass that same support json to generate_pseudo or the teacher and
+            # the ensemble will not line up.
+            torch.save({'state_dict': model.state_dict(),
+                        'meta': {'tta': {'mode': a.mode, 'lr': a.lr, 'steps': a.steps,
+                                         'shots': a.shots, 'seed': a.seed,
+                                         'category': a.category},
+                                 'support': [an['file_name'] for an in sup_anns]}},
+                       a.save_adapted)
+            print(f'  [saved] adapted weights -> {a.save_adapted}')
+            print(f'          support: {[an["file_name"] for an in sup_anns]}')
         model.load_state_dict(snapshot)        # reset: next character starts clean
 
         n_sup = int(support_visible(pool).sum())
