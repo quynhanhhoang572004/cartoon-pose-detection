@@ -333,7 +333,7 @@ def main():
             adapter = {n: p.detach().cpu().clone()
                        for n, p in select_params(model, a.mode, named=True)}
             n_ad = sum(v.numel() for v in adapter.values())
-            n_all = sum(p.numel() for p in model.parameters())
+            n_model = sum(p.numel() for p in model.parameters())
             torch.save({'adapter': adapter, 'base_checkpoint': a.checkpoint,
                         'meta': {'tta': {'mode': a.mode, 'lr': a.lr, 'steps': a.steps,
                                          'shots': a.shots, 'seed': a.seed,
@@ -343,7 +343,7 @@ def main():
             mb = os.path.getsize(a.save_adapted) / 1e6
             print(f'  [saved] adapter -> {a.save_adapted}  ({mb:.1f} MB)')
             print(f'          {len(adapter)} tensors, {n_ad:,} params '
-                  f'= {100 * n_ad / n_all:.2f}% of {n_all:,}')
+                  f'= {100 * n_ad / n_model:.2f}% of {n_model:,}')
             print(f'          support: {[an["file_name"] for an in sup_anns]}')
             print(f'          use it with:  --adapter {a.save_adapted}')
         model.load_state_dict(snapshot)        # reset: next character starts clean
