@@ -159,6 +159,14 @@ under-training. The adapter is ~0.08% of parameters, about 0.2 MB.
 - **Never put `\` after `!` in a notebook cell.** IPython mangles the
   continuation. Build the command as an f-string and run `!{cmd}` on one line —
   it also prints what actually ran, so an unset variable shows up immediately.
+- **Every annotation needs a `bbox`.** `TransformerPoseDataset` opens with
+  `if 'bbox' not in obj: continue` and also drops ones whose box degenerates or
+  whose `area` is 0, all in silence. A json can look complete and contribute
+  nothing. Training then dies far away in `random.sample()` with "Sample larger
+  than population", which is really "this character has fewer than
+  `num_shots + 1` usable objects". When that error appears, count how many
+  annotations per category survive the loader's filters rather than trusting
+  the json's own counts.
 - **Query images never enter the training json.** They are the only clean
   measurement.
 - **The teacher's support set must be the split's support set.** The adapter
