@@ -254,6 +254,9 @@ def main():
                     help='also require the sampled feature to match the keypoint prototype')
     ap.add_argument('--emb-thresh', type=float, default=0.3,
                     help='max cosine DISTANCE (1-cos) between a point and its keypoint prototype')
+    ap.add_argument('--adapter',
+                    help='character adapter from test_tta.py --save-adapted; '
+                         'laid over --checkpoint so the teacher is the adapted model')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--device', default='cuda:0')
     a = ap.parse_args()
@@ -263,6 +266,23 @@ def main():
     imgsz = cfg.model.encoder_config.img_size
     model = build_posenet(cfg.model)
     load_checkpoint(model, a.checkpoint, map_location='cpu')
+    if a.adapter:
+        # A character adapter from test_tta.py --save-adapted: just the tensors
+        # adaptation moved (the norm affines in --mode norm), laid over the base
+        # checkpoint. Teaching with it means teaching with the adapted model.
+        ad = torch.load(a.adapter, map_location='cpu')
+        sd = model.state_dict()
+        missing = [k for k in ad['adapter'] if k not in sd]
+        if missing:
+            raise SystemExit(f'[adapter] {len(missing)} tensors are not in this '
+                             f'model, e.g. {missing[:3]} -- wrong config?')
+        sd.update(ad['adapter'])
+        model.load_state_dict(sd)
+        sup = ad.get('meta', {}).get('support', [])
+        print(f'[adapter] {len(ad["adapter"])} tensors from {a.adapter}')
+        print(f'[adapter] it was adapted on: {sup}')
+        print('[adapter] --support-coco MUST be those same images, or the '
+              'teacher and the ensemble rest on different shots')
     model.eval().to(a.device)
 
     preprocess = transforms.Compose([

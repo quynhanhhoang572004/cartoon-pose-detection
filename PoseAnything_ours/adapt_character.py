@@ -20,15 +20,15 @@ Steps (each can be skipped once it has run):
 
 Nothing here trains. Step 6 hands you the command.
 
-Two things it deliberately does NOT do, because both quietly invalidate the
-result:
-  * it never lets the query images into the training json -- they are the only
-    clean measurement you have;
-  * it pseudo-labels with the BASE checkpoint, not the adapted one. Adapting on
-    all K shots makes the support subsets agree with each other even where they
-    are wrong, so the ensemble filter keeps more labels at lower accuracy (on
-    Goofy: coverage 0.221 -> 0.258, accuracy 0.611 -> 0.605). Pass
-    --pseudo-teacher tta to measure that for yourself on a new character.
+It never lets the query images into the training json -- they are the only clean
+measurement there is.
+
+On the teacher: the adapted model is the default, because what self-training
+needs is CORRECT LABELS PER FRAME, i.e. coverage times accuracy. On Goofy the
+adapter raised coverage 0.221 -> 0.258 while accuracy moved 0.611 -> 0.605,
+which on ~130 kept keypoints is well under one standard error -- so it is ~16%
+more correct labels at an accuracy we cannot distinguish. Step 3 re-measures
+both on each new character; --pseudo-teacher base switches back.
 """
 import argparse
 import json
@@ -109,8 +109,9 @@ def main():
     ap.add_argument('--eps', default='0.03')
     ap.add_argument('--min-visible', type=int, default=6)
     ap.add_argument('--emb-thresh', default='0.25')
-    ap.add_argument('--pseudo-teacher', default='base', choices=['base', 'tta'],
-                    help='base is the measured default; tta is there to be tested')
+    ap.add_argument('--pseudo-teacher', default='tta', choices=['base', 'tta'],
+                    help='tta lays the step-2 adapter over the base model: more '
+                         'kept labels at indistinguishable accuracy. base skips it')
 
     ap.add_argument('--steps', default='1,2,3,4,5,6',
                     help='which steps to run, e.g. "4,5,6" to resume')
@@ -124,7 +125,7 @@ def main():
 
     sup = str(out / 'support.json')
     qry = str(out / 'query.json')
-    tta_ckpt = str(out / f'{a.name}_tta.pth')
+    tta_ckpt = str(out / f'{a.name}_adapter.pth')
     pseudo = str(out / f'pseudo_{a.name}.json')
     merged = str(out / f'train_{a.name}.json')
 
@@ -144,7 +145,11 @@ def main():
            log=out / 'tta.txt')
         print(f'  -> {out / "tta.txt"}')
 
-    teacher = tta_ckpt if a.pseudo_teacher == 'tta' else a.checkpoint
+    # the adapter is a few hundred KB of norm affines, applied over the base
+    # checkpoint -- not a second copy of the model
+    teach = ['--checkpoint', a.checkpoint]
+    if a.pseudo_teacher == 'tta':
+        teach += ['--adapter', tta_ckpt]
     filt = ['--n-subsets', a.n_subsets, '--shots', a.filter_shots,
             '--eps', a.eps, '--min-visible', a.min_visible,
             '--use-embedding', '--emb-thresh', a.emb_thresh]
@@ -153,7 +158,7 @@ def main():
         print('\n=== 3. pseudo-label quality, on the held-out query images ===')
         print('    Read: accuracy of KEPT keypoints must beat the model\'s own')
         print('    PCK@0.05 from step 2, or the labels add nothing.')
-        sh([py, 'generate_pseudo.py', *common, '--checkpoint', teacher,
+        sh([py, 'generate_pseudo.py', *common, *teach,
             '--support-coco', sup, '--support-img-dir', a.img_dir,
             '--eval-coco', qry, '--eval-img-dir', a.img_dir,
             *filt, '--device', a.device],
@@ -164,7 +169,7 @@ def main():
         if not a.unlabeled_dir:
             sys.exit('[adapt] step 4 needs --unlabeled-dir')
         print('\n=== 4. pseudo-label the unlabelled frames ===')
-        sh([py, 'generate_pseudo.py', *common, '--checkpoint', teacher,
+        sh([py, 'generate_pseudo.py', *common, *teach,
             '--support-coco', sup, '--support-img-dir', a.img_dir,
             '--unlabeled-dir', a.unlabeled_dir, '--out', pseudo,
             *filt, '--device', a.device])

@@ -31,6 +31,7 @@ Reports baseline (no TTA) vs TTA on the SAME support/query split, averaged over
 --trials random splits, since a 5-shot result swings a lot with which 5 you get.
 """
 import argparse
+import os
 import json
 import random
 from pathlib import Path
@@ -58,36 +59,40 @@ NORM_LAYERS = (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.GroupNorm,
 # --------------------------------------------------------------------------- #
 #  which weights are allowed to move during adaptation                        #
 # --------------------------------------------------------------------------- #
-def select_params(model, mode):
+def select_params(model, mode, named=False):
     """Freeze everything, then unfreeze the chosen subset. Returns that subset.
 
     norm       -- only normalization affine params (TENT-style; safest on 5 shots)
     norm_head  -- norm params + the keypoint head (stronger, overfits sooner)
     all        -- everything (ablation upper bound; expect overfitting)
+
+    With named=True the names come too, which is what lets the adaptation be
+    saved as an adapter -- the handful of tensors that moved -- instead of a
+    copy of the whole model.
     """
     for p in model.parameters():
         p.requires_grad_(False)
 
-    chosen = []
+    chosen = []                              # list of (name, param)
     if mode in ('norm', 'norm_head'):
-        for m in model.modules():
+        for mname, m in model.named_modules():
             if isinstance(m, NORM_LAYERS):
-                for p in m.parameters(recurse=False):
+                for pname, p in m.named_parameters(recurse=False):
                     p.requires_grad_(True)
-                    chosen.append(p)
+                    chosen.append((f'{mname}.{pname}' if mname else pname, p))
     if mode == 'norm_head':
-        for p in model.keypoint_head.parameters():
+        for pname, p in model.keypoint_head.named_parameters():
             if not p.requires_grad:          # don't add the head's norms twice
                 p.requires_grad_(True)
-                chosen.append(p)
+                chosen.append((f'keypoint_head.{pname}', p))
     if mode == 'all':
-        for p in model.parameters():
+        for pname, p in model.named_parameters():
             p.requires_grad_(True)
-            chosen.append(p)
+            chosen.append((pname, p))
 
     if not chosen:
         raise SystemExit(f'--mode {mode} selected no parameters to adapt')
-    return chosen
+    return chosen if named else [p for _, p in chosen]
 
 
 # --------------------------------------------------------------------------- #
@@ -317,19 +322,30 @@ def main():
         l_before, l_after = adapt(model, pool, skeleton, a)
         (tta_pck, tta_epe, _), _ = evaluate(model, pool, qry_anns, skeleton, a, preprocess)
         if a.save_adapted and trial == 0:
-            # Keep trial 0's adapted weights so generate_pseudo.py can teach with
-            # them. Trial 0 draws its support with Random(seed) over the same
-            # annotation order, so it IS the split written by split_goofy.py --
-            # pass that same support json to generate_pseudo or the teacher and
-            # the ensemble will not line up.
-            torch.save({'state_dict': model.state_dict(),
+            # Save the ADAPTER: only the tensors adaptation was allowed to move.
+            # In --mode norm that is the normalization affine params, a fraction
+            # of a percent of the model, so this is ~1 MB instead of ~250 MB --
+            # and one adapter per character, over the base model, is the honest
+            # description of what TTA produces.
+            # Trial 0 draws its support with Random(seed) over the same
+            # annotation order as adapt_character.py's split, so the support set
+            # recorded here IS that split's support.json.
+            adapter = {n: p.detach().cpu().clone()
+                       for n, p in select_params(model, a.mode, named=True)}
+            n_ad = sum(v.numel() for v in adapter.values())
+            n_all = sum(p.numel() for p in model.parameters())
+            torch.save({'adapter': adapter, 'base_checkpoint': a.checkpoint,
                         'meta': {'tta': {'mode': a.mode, 'lr': a.lr, 'steps': a.steps,
                                          'shots': a.shots, 'seed': a.seed,
                                          'category': a.category},
                                  'support': [an['file_name'] for an in sup_anns]}},
                        a.save_adapted)
-            print(f'  [saved] adapted weights -> {a.save_adapted}')
+            mb = os.path.getsize(a.save_adapted) / 1e6
+            print(f'  [saved] adapter -> {a.save_adapted}  ({mb:.1f} MB)')
+            print(f'          {len(adapter)} tensors, {n_ad:,} params '
+                  f'= {100 * n_ad / n_all:.2f}% of {n_all:,}')
             print(f'          support: {[an["file_name"] for an in sup_anns]}')
+            print(f'          use it with:  --adapter {a.save_adapted}')
         model.load_state_dict(snapshot)        # reset: next character starts clean
 
         n_sup = int(support_visible(pool).sum())
