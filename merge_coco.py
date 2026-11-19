@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 CANONICAL = {
     "tom": 1, "jerry": 2,
     "bugs_bunny": 3, "pink_panther": 4, "sylvester": 5, "mickey_mouse": 6,
+    "goofy": 7,
 }
 
 
