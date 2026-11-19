@@ -343,9 +343,26 @@ def main():
             else:
                 kpts += [0.0, 0.0, 0]                  # dropped -> invisible
 
+        # A bbox is not optional: TransformerPoseDataset's loader does
+        # `if 'bbox' not in obj: continue`, so annotations without one are
+        # dropped in silence. A character whose pseudo-labels all lack a bbox
+        # then has too few objects to sample an episode, and training dies far
+        # away from here with "Sample larger than population".
+        vx, vy = pts_orig[visible, 0], pts_orig[visible, 1]
+        pad = 0.2 * max(vx.max() - vx.min(), vy.max() - vy.min(), 1.0)
+        x1 = float(max(0.0, vx.min() - pad))
+        y1 = float(max(0.0, vy.min() - pad))
+        x2 = float(min(W - 1.0, vx.max() + pad))
+        y2 = float(min(H - 1.0, vy.max() + pad))
+        bw, bh = x2 - x1, y2 - y1
+        if bw <= 1 or bh <= 1:                 # the loader drops these too
+            skipped += 1
+            continue
+
         out_images.append({'id': iid, 'file_name': fp.name, 'width': W, 'height': H})
         out_anns.append({'id': aid, 'image_id': iid, 'category_id': a.category,
                          'keypoints': kpts, 'num_keypoints': int(visible.sum()),
+                         'bbox': [x1, y1, bw, bh], 'area': bw * bh, 'iscrowd': 0,
                          'is_pseudo': 1})
         iid += 1; aid += 1; kept += 1
 
