@@ -64,16 +64,32 @@ cd "$OURS"
 python setup.py develop >/dev/null
 export WANDB_MODE=offline
 
-echo "=== 2. BEFORE: base model, fixed split, no adaptation ==="
-# --trials 1 --seed 0 reuses the exact split the pseudo-labels were made with:
-# the 5 support shots that ARE in training, and the query images that are NOT.
-# More trials would draw other support sets, whose queries include images the
-# model trained on.
-python test_tta.py --config configs/cartoon/selftrain.py --checkpoint "$BASE" \
-  --coco "$EVAL_COCO" --img-dir "$CHR_IMGS" --category "$CAT" \
-  --shots 5 --trials 1 --seed 0 --steps 0 | tee "$ROOT/before_$TAG.txt" | tail -12
+# Every measurement below uses --trials 1 --seed 0: the exact split the
+# pseudo-labels were made with, so the 5 support shots are the ones that are in
+# training and the query images are the ones that are not. Another seed draws a
+# different support set, whose queries include images the model trained on.
+#
+# test_tta.py prints BOTH columns in one run, so one call per row fills the 2x2:
+#
+#                  no TTA      + TTA
+#   base             .           .
+#   self-trained     .           .
+#
+measure () {   # measure <checkpoint> <outfile>
+  python test_tta.py --config configs/cartoon/selftrain.py --checkpoint "$1" \
+    --coco "$EVAL_COCO" --img-dir "$CHR_IMGS" --category "$CAT" \
+    --shots 5 --trials 1 --seed 0 \
+    --steps 20 --lr 1e-3 --mode norm | tee "$2" | tail -12
+}
+
+echo "=== 2. BEFORE: the base model (row 1 of the table) ==="
+measure "$BASE" "$ROOT/before_$TAG.txt"
 
 echo "=== 3. train ($EPOCHS epochs) ==="
+# load_from is the BASE, deliberately, NOT base+adapter. The adapter has already
+# done its job -- it was the teacher that produced these labels. Folding it into
+# the starting weights would mean the "self-trained, no TTA" cell silently
+# contains TTA as well, and the two contributions could no longer be separated.
 CUDA_VISIBLE_DEVICES=$GPU python train.py \
   --config configs/cartoon/selftrain.py --work-dir "$WORK" \
   --cfg-options load_from="$BASE" total_epochs=$EPOCHS \
@@ -81,18 +97,17 @@ CUDA_VISIBLE_DEVICES=$GPU python train.py \
     data.train.img_prefix="$IMGDIR/" \
     data.train.valid_class_ids="$IDS"
 
-echo "=== 4. AFTER: same split, same command, new weights ==="
-python test_tta.py --config configs/cartoon/selftrain.py \
-  --checkpoint "$WORK/latest.pth" \
-  --coco "$EVAL_COCO" --img-dir "$CHR_IMGS" --category "$CAT" \
-  --shots 5 --trials 1 --seed 0 --steps 0 | tee "$ROOT/after_$TAG.txt" | tail -12
+echo "=== 4. AFTER: the self-trained model (row 2) ==="
+measure "$WORK/latest.pth" "$ROOT/after_$TAG.txt"
 
 echo
 echo "================ $TAG ================"
-echo "BEFORE:"; grep -E "^PCK@|^EPE" "$ROOT/before_$TAG.txt"
-echo "AFTER:";  grep -E "^PCK@|^EPE" "$ROOT/after_$TAG.txt"
+echo "BASE:";         grep -E "^PCK@|^EPE" "$ROOT/before_$TAG.txt"
+echo "SELF-TRAINED:"; grep -E "^PCK@|^EPE" "$ROOT/after_$TAG.txt"
 echo
-echo "Read the 'no TTA' column. Self-training is supposed to move THAT -- it"
-echo "changed the weights, so the gain should be there without adapting at all."
+echo "Each line is:  no TTA | with TTA | delta | unmasked."
+echo "Self-training should move the 'no TTA' column -- it changed the weights,"
+echo "so the gain must be there without adapting at all. Whether the '+TTA'"
+echo "column still gains on top is the question of whether the two compose."
 echo "If PCK@0.2 rises while PCK@0.05 falls, the pseudo-labels taught position"
 echo "but blurred precision: regenerate them with a tighter --eps."
