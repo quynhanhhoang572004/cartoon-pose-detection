@@ -151,6 +151,12 @@ def parse_args():
     p.add_argument('--img-dir', required=True, help='folder with the val images')
     p.add_argument('--outdir', default='viz_pred')
     p.add_argument('--per-cat', type=int, default=3, help='query images per character')
+    p.add_argument('--support', nargs='+', metavar='FILE',
+                   help='pick the support images by filename instead of letting it '
+                        'choose the poses nearest each query; they must be annotated '
+                        'in --ann, since their keypoints are the support')
+    p.add_argument('--query', nargs='+', metavar='FILE',
+                   help='pick the query images by filename instead of sampling')
     p.add_argument('--num-shots', type=int, default=5, help='K support images per episode')
     p.add_argument('--radius', type=int, default=2, help='keypoint dot radius')
     p.add_argument('--thick', type=int, default=1, help='skeleton line thickness')
@@ -210,6 +216,34 @@ def main():
     img_cnt = Counter(an['image_id'] for an in coco['annotations'])
     K = a.num_shots
     rng = random.Random(a.seed)
+
+    # --support / --query name the images by filename, for when the automatic
+    # pick is not the comparison you want to look at -- e.g. reproducing the
+    # exact support set a measurement used, or putting the same query in front
+    # of two checkpoints.
+    def by_name(names, what):
+        name2ann = {id2img[an['image_id']]['file_name']: an
+                    for an in coco['annotations']}
+        picked = []
+        for n in names:
+            n = Path(n).name
+            if n not in name2ann:
+                raise SystemExit(f'--{what}: {n} is not in {a.ann}. '
+                                 f'It must be an annotated image, since its '
+                                 f'keypoints are what the model is given.')
+            picked.append(name2ann[n])
+        return picked
+
+    chosen_sup = by_name(a.support, 'support') if a.support else None
+    chosen_qry = by_name(a.query, 'query') if a.query else None
+    if chosen_sup and len(chosen_sup) != K:
+        print(f'[note] --num-shots is {K} but {len(chosen_sup)} support images '
+              f'were named; using {len(chosen_sup)}')
+        K = len(chosen_sup)
+    if chosen_sup or chosen_qry:
+        cats = {an['category_id'] for an in (chosen_sup or []) + (chosen_qry or [])}
+        by_cat = {c: v for c, v in by_cat.items() if c in cats}
+
     for cat, anns in by_cat.items():
         # candidates: single-instance (avoid Mickey+Minnie) + full-body
         cands = [x for x in anns
@@ -224,11 +258,19 @@ def main():
 
         # pick a few queries, then for EACH query select the K support images whose
         # POSE is CLOSEST to that query -> support tailored to the query.
-        q_choices = list(cands)
-        rng.shuffle(q_choices)
-        for q in q_choices[:a.per_cat]:
-            others = [c for c in cands if c['id'] != q['id']]
-            sup_anns = sorted(others, key=lambda s: pose_dist(q, s))[:K]  # nearest to query
+        if chosen_qry is not None:
+            q_choices = [q for q in chosen_qry if q['category_id'] == cat]
+            n_queries = len(q_choices)
+        else:
+            q_choices = list(cands)
+            rng.shuffle(q_choices)
+            n_queries = a.per_cat
+        for q in q_choices[:n_queries]:
+            if chosen_sup is not None:
+                sup_anns = chosen_sup
+            else:
+                others = [c for c in cands if c['id'] != q['id']]
+                sup_anns = sorted(others, key=lambda s: pose_dist(q, s))[:K]  # nearest to query
             sups = [build_one(x) for x in sup_anns]
             s_imgs = [s[0] for s in sups]
             s_tgts = [s[1] for s in sups]
