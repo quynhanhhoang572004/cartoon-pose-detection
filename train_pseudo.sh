@@ -11,8 +11,9 @@
 # rounds get better labels because the teacher got better, which is the whole
 # point of doing more than one.
 #
-# Run `adapt_character.py --steps 1` first: it writes the support/query split
-# this reads, using the same shuffle test_tta.py measures with.
+# One command does all of it, including the support/query split on first run.
+# Everything a round writes is tagged with the round number, so a run can be
+# resumed or compared against an earlier one without overwriting it.
 set -euo pipefail
 
 NAME=${1:-goofy}
@@ -46,10 +47,26 @@ SUP=$ADAPT/support.json
 IDS="[1,2,3,4,5,$CAT]"
 
 echo "=== 0. checks ==="
-for f in "$BASE" "$SUP" "$LBL_COCO" "$EVAL_COCO" "$UNLAB" "$CHR_IMGS"; do
+for f in "$BASE" "$LBL_COCO" "$EVAL_COCO" "$UNLAB" "$CHR_IMGS"; do
   [ -e "$f" ] || { echo "MISSING: $f"; exit 1; }
 done
 echo "  ok | $ROUNDS round(s)${MAX_PER_CAT:+, merge capped at $MAX_PER_CAT/cat}"
+
+cd "$OURS"
+python setup.py develop >/dev/null
+export WANDB_MODE=offline MPLBACKEND=Agg
+
+# The support/query split, if it is not there yet. Written once and reused by
+# every round and every measurement: the shots in it are the ones that end up
+# in training, and the queries are the ones that never do. Re-splitting between
+# rounds would quietly move images across that line.
+if [ ! -e "$SUP" ]; then
+  echo "=== 0b. support/query split ==="
+  mkdir -p "$ADAPT"
+  python adapt_character.py --name "$NAME" --category "$CAT" \
+    --config configs/cartoon/selftrain.py --checkpoint "$BASE" \
+    --coco "$EVAL_COCO" --img-dir "$CHR_IMGS" --out-dir "$ADAPT" --steps 1
+fi
 
 echo "=== 1. one flat image dir ==="
 mkdir -p "$IMGDIR"
@@ -57,10 +74,6 @@ for d in "$LBL_IMGS" "$CHR_IMGS" "$UNLAB"; do
   cp -n "$d"/*.jpg "$IMGDIR"/ 2>/dev/null || true
 done
 echo "  $(ls "$IMGDIR" | wc -l) images"
-
-cd "$OURS"
-python setup.py develop >/dev/null
-export WANDB_MODE=offline MPLBACKEND=Agg
 
 # Every measurement uses --trials 1 --seed 0: the split adapt_character.py
 # wrote, so the support shots are the ones in training and the query images are
