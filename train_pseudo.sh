@@ -33,6 +33,8 @@ UNLAB=$ROOT/data/${NAME}_frames                           # its unlabelled frame
 EVAL_COCO=$ROOT/data/coco_$NAME.json                      # all its labelled frames
 EPOCHS=20
 GPU=0
+CUMULATIVE=1          # 1: each round trains on from the last (Noisy Student).
+                      # 0: each round restarts from BASE.
 MAX_PER_CAT=""                       # set e.g. 150 for the "balanced" variant
 FILTER="--n-subsets 3 --shots 3 --eps 0.05 --min-visible 4 --use-embedding --emb-thresh 0.35"
 TTA="--steps 20 --lr 1e-3 --mode norm"
@@ -117,13 +119,21 @@ for r in $(seq 1 "$ROUNDS"); do
     ${MAX_PER_CAT:+--max-per-cat $MAX_PER_CAT} \
     "$LBL_COCO" "$SUP" "$PSEUDO" | tail -3
 
-  # d) train from the BASE every round, not from the previous round's weights.
-  #    The teacher improves round over round, so the labels improve; restarting
-  #    from the base keeps a round's result attributable to its labels instead
-  #    of compounding whatever the previous round drifted into. Set START=$CKPT
-  #    below to compound instead, which is what the old run_selftrain.sh did.
+  # d) train on from the previous round's weights (CUMULATIVE=1, the default)
+  #    or restart from the base each round (CUMULATIVE=0).
+  #
+  #    Cumulative is what Noisy Student does, and the reason is arithmetic:
+  #    restarting makes round N just "base + EPOCHS epochs on round-N labels",
+  #    so the only thing that ever improves is the labels. Once those saturate
+  #    -- which they do after a round or two -- the later rounds buy nothing.
+  #    Training on compounds instead.
+  #
+  #    What it costs is confirmation bias: the model reinforcing its own
+  #    mistakes round after round. That is what the per-round measurement and
+  #    the regression stop below are for.
   echo "--- d) train ($EPOCHS epochs) ---"
-  START=$BASE
+  [ "$CUMULATIVE" = "1" ] && START=$CKPT || START=$BASE
+  echo "    starting from: $START"
   CUDA_VISIBLE_DEVICES=$GPU python train.py \
     --config configs/cartoon/selftrain.py --work-dir "$WORK" \
     --cfg-options load_from="$START" total_epochs=$EPOCHS \
@@ -133,6 +143,19 @@ for r in $(seq 1 "$ROUNDS"); do
 
   echo "--- e) measure round $r ---"
   measure "$WORK/latest.pth" "$ROOT/measure_${TAG}_r$r.txt"
+
+  # Stop if this round went backwards. Training on compounds whatever the
+  # previous round became, so carrying a bad round forward poisons every round
+  # after it -- and the useful artefact is the last round that improved, which
+  # $CKPT still points at.
+  prev=$(grep -oP '^PCK@0.05\s+\K[0-9.]+' "$ROOT/measure_${TAG}_r$((r-1)).txt" 2>/dev/null || echo 0)
+  now=$(grep -oP '^PCK@0.05\s+\K[0-9.]+' "$ROOT/measure_${TAG}_r$r.txt" 2>/dev/null || echo 0)
+  if awk "BEGIN{exit !($now < $prev - 0.005)}"; then
+    echo "!! round $r PCK@0.05 $now < round $((r-1)) $prev -- the labels got worse."
+    echo "!! stopping; keeping round $((r-1)). Tighten --eps in FILTER and rerun."
+    break
+  fi
+  echo "    round $r: PCK@0.05 $prev -> $now"
   CKPT=$WORK/latest.pth            # next round teaches with this
 done
 
