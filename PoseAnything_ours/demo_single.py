@@ -33,8 +33,8 @@ from torchvision import transforms
 from models import *  # noqa: F401,F403  (registers custom classes)
 from models.datasets.pipelines.top_down_transform import TopDownGenerateTargetFewShot
 # reuse the exact drawing / crop / pad helpers demo_batch uses
-from demo_batch import (SKELETON, Resize_Pad, kpts_to_pad, resize_pad_raw,
-                        crop_char, draw_pose)
+from demo_batch import (SKELETON, Resize_Pad, apply_adapter, crop_char,
+                        draw_pose, kpts_to_pad, resize_pad_raw)
 
 
 def load_support_kp(a):
@@ -70,6 +70,9 @@ def parse_args():
     p.add_argument('--kp', help='manual JSON: {"keypoints":[[x,y],...], "skeleton":[...]}')
     p.add_argument('--config', required=True)
     p.add_argument('--checkpoint', required=True)
+    p.add_argument('--adapter', metavar='PATH',
+                   help='character adapter from test_tta.py --save-adapted; '
+                        'checkpoint + adapter is what actually gets deployed')
     p.add_argument('--outdir', default='output')
     p.add_argument('--query-bbox', nargs=4, type=float, default=None,
                    metavar=('x0', 'y0', 'x1', 'y1'),
@@ -88,6 +91,8 @@ def main():
 
     model = build_posenet(cfg.model)
     load_checkpoint(model, a.checkpoint, map_location='cpu')
+    if a.adapter:
+        apply_adapter(model, a.adapter)
     model.eval().to(a.device)
 
     preprocess = transforms.Compose([
