@@ -44,6 +44,10 @@ CUMULATIVE=${CUMULATIVE:-1}   # 1: each round trains on from the last (Noisy Stu
 MAX_PER_CAT=${MAX_PER_CAT:-}                 # set e.g. 150 for the "balanced" variant
 FILTER=${FILTER:-"--n-subsets 3 --shots 3 --eps 0.05 --min-visible 4 --use-embedding --emb-thresh 0.35"}
 TTA=${TTA:-"--steps 20 --lr 1e-3 --mode norm"}
+# The interpreter to run everything with. On Kaggle the repo's stack lives in a
+# separate venv, and relying on PATH is fragile -- name it instead:
+#   PY=/kaggle/temp/env/bin/python bash train_pseudo.sh goofy 7 2
+PY=${PY:-python}
 # ---------------------------------------------------------
 
 [ "$VARIANT" = "balanced" ] && MAX_PER_CAT=${MAX_PER_CAT:-150}
@@ -57,10 +61,15 @@ echo "=== 0. checks ==="
 for f in "$BASE" "$LBL_COCO" "$EVAL_COCO" "$UNLAB" "$CHR_IMGS"; do
   [ -e "$f" ] || { echo "MISSING: $f"; exit 1; }
 done
-echo "  ok | $ROUNDS round(s)${MAX_PER_CAT:+, merge capped at $MAX_PER_CAT/cat}"
+"$PY" -c "import mmcv, mmpose, torch" 2>/dev/null || {
+  echo "MISSING: \$PY ($PY) cannot import mmcv/mmpose/torch."
+  echo "         Point PY at the interpreter that has them, e.g."
+  echo "         PY=/kaggle/temp/env/bin/python bash train_pseudo.sh $NAME $CAT $ROUNDS"
+  exit 1; }
+echo "  ok | $ROUNDS round(s)${MAX_PER_CAT:+, merge capped at $MAX_PER_CAT/cat} | $PY"
 
 cd "$OURS"
-python setup.py develop >/dev/null
+"$PY" setup.py develop >/dev/null
 export WANDB_MODE=offline MPLBACKEND=Agg
 
 # The support/query split, if it is not there yet. Written once and reused by
@@ -70,7 +79,7 @@ export WANDB_MODE=offline MPLBACKEND=Agg
 if [ ! -e "$SUP" ]; then
   echo "=== 0b. support/query split ==="
   mkdir -p "$ADAPT"
-  python adapt_character.py --name "$NAME" --category "$CAT" \
+  "$PY" adapt_character.py --name "$NAME" --category "$CAT" \
     --config configs/cartoon/selftrain.py --checkpoint "$BASE" \
     --coco "$EVAL_COCO" --img-dir "$CHR_IMGS" --out-dir "$ADAPT" --steps 1
 fi
@@ -89,7 +98,7 @@ echo "  $(ls "$IMGDIR" | wc -l) images"
 # test_tta.py prints the no-TTA and with-TTA columns from one call, so each of
 # these fills a row of the table.
 measure () {   # measure <checkpoint> <outfile>
-  python test_tta.py --config configs/cartoon/selftrain.py --checkpoint "$1" \
+  "$PY" test_tta.py --config configs/cartoon/selftrain.py --checkpoint "$1" \
     --coco "$EVAL_COCO" --img-dir "$CHR_IMGS" --category "$CAT" \
     --shots 5 --trials 1 --seed 0 $TTA | tee "$2" | tail -12
 }
@@ -109,18 +118,18 @@ for r in $(seq 1 "$ROUNDS"); do
   #    the parameters, so this is cheap, and a better teacher keeps far more
   #    labels through the filter (on Goofy: 490 frames against 44).
   echo "--- a) adapter for round $r ---"
-  python test_tta.py --config configs/cartoon/selftrain.py --checkpoint "$CKPT" \
+  "$PY" test_tta.py --config configs/cartoon/selftrain.py --checkpoint "$CKPT" \
     --coco "$EVAL_COCO" --img-dir "$CHR_IMGS" --category "$CAT" \
     --shots 5 --trials 1 --seed 0 $TTA --save-adapted "$ADAPTER" | tail -4
 
   echo "--- b) pseudo-label $(ls "$UNLAB"/*.jpg | wc -l) frames ---"
-  python generate_pseudo.py --config configs/cartoon/selftrain.py \
+  "$PY" generate_pseudo.py --config configs/cartoon/selftrain.py \
     --checkpoint "$CKPT" --adapter "$ADAPTER" \
     --support-coco "$SUP" --support-img-dir "$CHR_IMGS" --category "$CAT" \
     --unlabeled-dir "$UNLAB" --out "$PSEUDO" $FILTER | tail -3
 
   echo "--- c) merge ---"   # query.json is deliberately NOT merged in
-  python "$ROOT/merge_coco.py" --out "$MERGED" \
+  "$PY" "$ROOT/merge_coco.py" --out "$MERGED" \
     ${MAX_PER_CAT:+--max-per-cat $MAX_PER_CAT} \
     "$LBL_COCO" "$SUP" "$PSEUDO" | tail -3
 
@@ -139,7 +148,7 @@ for r in $(seq 1 "$ROUNDS"); do
   echo "--- d) train ($EPOCHS epochs) ---"
   [ "$CUMULATIVE" = "1" ] && START=$CKPT || START=$BASE
   echo "    starting from: $START"
-  CUDA_VISIBLE_DEVICES=$GPU python train.py \
+  CUDA_VISIBLE_DEVICES=$GPU "$PY" train.py \
     --config configs/cartoon/selftrain.py --work-dir "$WORK" \
     --cfg-options load_from="$START" total_epochs=$EPOCHS \
       data.train.ann_file="$MERGED" \
