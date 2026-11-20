@@ -21,28 +21,33 @@ CAT=${2:-7}
 ROUNDS=${3:-1}
 VARIANT=${4:-}                       # "" or e.g. "balanced"; see MAX_PER_CAT
 
-# ------------------------- EDIT THESE -------------------------
-ROOT=/home/subnh3/projects/QuynhAnh/cartoon-pose-detection
-OURS=$ROOT/PoseAnything_ours
-BASE=$OURS/work_dirs/selftrain_r4/best_PCK_epoch_40.pth   # round 1 starts here
-ADAPT=$ROOT/data/adapt_$NAME                              # adapt_character.py --out-dir
-LBL_COCO=$ROOT/data/merged/coco_train.json                # the existing real labels
-LBL_IMGS=$ROOT/data/merged/images/train
-CHR_IMGS=$ROOT/data/${NAME}_eval/images                   # its labelled frames
-UNLAB=$ROOT/data/${NAME}_frames                           # its unlabelled frames
-EVAL_COCO=$ROOT/data/coco_$NAME.json                      # all its labelled frames
-EPOCHS=20
-GPU=0
-CUMULATIVE=1          # 1: each round trains on from the last (Noisy Student).
-                      # 0: each round restarts from BASE.
-MAX_PER_CAT=""                       # set e.g. 150 for the "balanced" variant
-FILTER="--n-subsets 3 --shots 3 --eps 0.05 --min-visible 4 --use-embedding --emb-thresh 0.35"
-TTA="--steps 20 --lr 1e-3 --mode norm"
-# --------------------------------------------------------------
+# ---- defaults, each overridable from the environment ----
+# Every value below takes an env var, so the same script runs on the server and
+# on Kaggle (where /kaggle/input is read-only and the paths differ) without
+# anyone editing it and then committing their machine's paths.
+#     ROOT=/kaggle/working CHR_IMGS=... bash train_pseudo.sh goofy 7 2
+ROOT=${ROOT:-/home/subnh3/projects/QuynhAnh/cartoon-pose-detection}
+OURS=${OURS:-$ROOT/PoseAnything_ours}
+OUT=${OUT:-$ROOT}                                         # where results are written
+BASE=${BASE:-$OURS/work_dirs/selftrain_r4/best_PCK_epoch_40.pth}   # round 1 starts here
+ADAPT=${ADAPT:-$OUT/adapt_$NAME}                          # split + adapters + pseudo
+LBL_COCO=${LBL_COCO:-$ROOT/data/merged/coco_train.json}   # the existing real labels
+LBL_IMGS=${LBL_IMGS:-$ROOT/data/merged/images/train}
+CHR_IMGS=${CHR_IMGS:-$ROOT/data/${NAME}_eval/images}      # its labelled frames
+UNLAB=${UNLAB:-$ROOT/data/${NAME}_frames}                 # its unlabelled frames
+EVAL_COCO=${EVAL_COCO:-$ROOT/data/coco_$NAME.json}        # all its labelled frames
+IMGDIR=${IMGDIR:-$OUT/selftrain_images_$NAME}             # one flat dir for img_prefix
+EPOCHS=${EPOCHS:-20}
+GPU=${GPU:-0}
+CUMULATIVE=${CUMULATIVE:-1}   # 1: each round trains on from the last (Noisy Student).
+                              # 0: each round restarts from BASE.
+MAX_PER_CAT=${MAX_PER_CAT:-}                 # set e.g. 150 for the "balanced" variant
+FILTER=${FILTER:-"--n-subsets 3 --shots 3 --eps 0.05 --min-visible 4 --use-embedding --emb-thresh 0.35"}
+TTA=${TTA:-"--steps 20 --lr 1e-3 --mode norm"}
+# ---------------------------------------------------------
 
 [ "$VARIANT" = "balanced" ] && MAX_PER_CAT=${MAX_PER_CAT:-150}
 TAG=$NAME${VARIANT:+_$VARIANT}
-IMGDIR=$ROOT/data/selftrain_images_$NAME
 SUP=$ADAPT/support.json
 # the dataset never samples a category outside this list, so a missing $CAT
 # means training completes, looking healthy, having learnt nothing new
@@ -90,12 +95,12 @@ measure () {   # measure <checkpoint> <outfile>
 }
 
 echo "=== 2. BEFORE: the base model ==="
-measure "$BASE" "$ROOT/measure_${TAG}_r0.txt"
+measure "$BASE" "$OUT/measure_${TAG}_r0.txt"
 
 CKPT=$BASE
 for r in $(seq 1 "$ROUNDS"); do
   echo "================ $TAG  round $r / $ROUNDS ================"
-  WORK=$OURS/work_dirs/selftrain_${TAG}_r$r
+  WORK=$OUT/work_dirs/selftrain_${TAG}_r$r
   ADAPTER=$ADAPT/${NAME}_adapter_r$r.pth
   PSEUDO=$ADAPT/pseudo_${NAME}_r$r.json
   MERGED=$ADAPT/train_${TAG}_r$r.json
@@ -142,14 +147,14 @@ for r in $(seq 1 "$ROUNDS"); do
       data.train.valid_class_ids="$IDS"
 
   echo "--- e) measure round $r ---"
-  measure "$WORK/latest.pth" "$ROOT/measure_${TAG}_r$r.txt"
+  measure "$WORK/latest.pth" "$OUT/measure_${TAG}_r$r.txt"
 
   # Stop if this round went backwards. Training on compounds whatever the
   # previous round became, so carrying a bad round forward poisons every round
   # after it -- and the useful artefact is the last round that improved, which
   # $CKPT still points at.
-  prev=$(grep -oP '^PCK@0.05\s+\K[0-9.]+' "$ROOT/measure_${TAG}_r$((r-1)).txt" 2>/dev/null || echo 0)
-  now=$(grep -oP '^PCK@0.05\s+\K[0-9.]+' "$ROOT/measure_${TAG}_r$r.txt" 2>/dev/null || echo 0)
+  prev=$(grep -oP '^PCK@0.05\s+\K[0-9.]+' "$OUT/measure_${TAG}_r$((r-1)).txt" 2>/dev/null || echo 0)
+  now=$(grep -oP '^PCK@0.05\s+\K[0-9.]+' "$OUT/measure_${TAG}_r$r.txt" 2>/dev/null || echo 0)
   if awk "BEGIN{exit !($now < $prev - 0.005)}"; then
     echo "!! round $r PCK@0.05 $now < round $((r-1)) $prev -- the labels got worse."
     echo "!! stopping; keeping round $((r-1)). Tighten --eps in FILTER and rerun."
@@ -161,7 +166,7 @@ done
 
 echo
 echo "================ $TAG ================"
-for f in "$ROOT"/measure_${TAG}_r*.txt; do
+for f in "$OUT"/measure_${TAG}_r*.txt; do
   echo "--- $(basename "$f" .txt)"
   grep -E "^PCK@|^EPE" "$f"
 done
