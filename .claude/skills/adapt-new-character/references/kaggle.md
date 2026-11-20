@@ -74,6 +74,14 @@ if not os.path.exists(PY):
 # --no-deps skips chumpy (SMPL); its setup.py imports pip and nothing here uses it
 !uv pip install -q --python {PY} --no-deps mmpose==0.29.0
 
+# LAST, after everything else. The two `pip install` calls above resolve on
+# their own and have no reason to respect numpy<2, so they pull numpy 2.x back
+# in and every compiled module then dies on "_ARRAY_API not found". Re-pinning
+# here only downgrades numpy -- mmcv, cv2 and xtcocotools were built against
+# 1.x and need it only at runtime, so nothing is reinstalled. Bitten three
+# times in this project; keep this line last.
+!{PY} -m pip install -q "numpy<2"
+
 # mmpose 0.29.0 caps mmcv at 1.7.0 but torch 2.0 only has a 1.7.2 wheel, which
 # is API-compatible. Patch without importing mmpose -- the import is the assert.
 import subprocess, pathlib
