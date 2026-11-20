@@ -69,7 +69,11 @@ done
 echo "  ok | $ROUNDS round(s)${MAX_PER_CAT:+, merge capped at $MAX_PER_CAT/cat} | $PY"
 
 cd "$OURS"
-"$PY" setup.py develop >/dev/null
+# Non-fatal: every call below runs from this directory, so `import models`
+# resolves from cwd whether or not the package is registered. setup.py develop
+# also drags in the repo's requirements.txt, whose unpinned opencv-python wants
+# numpy>=2 and so fails the whole run over something it does not need.
+"$PY" setup.py develop >/dev/null 2>&1 || echo "  (setup.py develop failed; cwd import is enough)"
 export WANDB_MODE=offline MPLBACKEND=Agg
 
 # The support/query split, if it is not there yet. Written once and reused by
