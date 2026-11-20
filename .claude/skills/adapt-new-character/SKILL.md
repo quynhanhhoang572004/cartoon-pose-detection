@@ -97,15 +97,22 @@ These came out of a sweep; start here rather than re-deriving them.
 | `--mode` | `norm` | `norm_head` **diverges** (0.470 → 0.075, loss rises). 5 shots cannot constrain the head |
 | `--lr` | `1e-3` | `1e-4` gives +0.005 and looks like failure; `3e-3` is worse and unstable |
 | `--steps` | `20` | saturates there; 40 and 80 add nothing while the support loss keeps falling |
-| pseudo teacher | base + adapter | more kept labels at indistinguishable accuracy |
+| pseudo teacher | base + adapter | +17% coverage at indistinguishable accuracy (small; re-measure per character) |
 | filter | `--eps 0.05 --min-visible 4 --emb-thresh 0.35` | see below |
 
 Pick filter thresholds by **coverage × accuracy** — the count of correct labels
 is what self-training consumes — subject to accuracy staying well above the
 model's own PCK@0.05, or the labels add nothing. On Goofy, 0.03/0.25/6 gave
 0.221 × 0.611 while 0.05/0.35/4 gave 0.319 × 0.599: 41% more correct labels for
-a 0.012 accuracy cost. `--min-visible` is a *frame*-level cut and bites hardest
-(44 frames kept at 6, 490 at 4).
+a 0.012 accuracy cost.
+
+`--min-visible` dominates, and it is easy to misread as something else.
+It is a *frame*-level cut: Goofy kept 44 frames at 6 and 490 at 4. Those two
+runs also used different teachers, so the jump is **not** evidence about the
+teacher — the controlled comparison, same thresholds, is coverage 0.221 (base)
+against 0.258 (adapter), which is +17% at an accuracy difference inside the
+noise. Change one knob at a time here; it is unusually easy to attribute a
+threshold effect to the teacher.
 
 ## Measuring the result
 
