@@ -40,7 +40,7 @@ from torchvision import transforms
 from models import *  # noqa: F401,F403  (registers custom classes)
 from models.datasets.pipelines.top_down_transform import TopDownGenerateTargetFewShot
 # reuse the exact crop / pad helpers the model was trained/evaluated with
-from demo_batch import SKELETON, Resize_Pad, kpts_to_pad, crop_char
+from demo_batch import SKELETON, Resize_Pad, apply_adapter, crop_char, kpts_to_pad
 
 
 # ----- coordinate helper: undo the whole-image pad+resize (256 -> original px)
@@ -267,22 +267,7 @@ def main():
     model = build_posenet(cfg.model)
     load_checkpoint(model, a.checkpoint, map_location='cpu')
     if a.adapter:
-        # A character adapter from test_tta.py --save-adapted: just the tensors
-        # adaptation moved (the norm affines in --mode norm), laid over the base
-        # checkpoint. Teaching with it means teaching with the adapted model.
-        ad = torch.load(a.adapter, map_location='cpu')
-        sd = model.state_dict()
-        missing = [k for k in ad['adapter'] if k not in sd]
-        if missing:
-            raise SystemExit(f'[adapter] {len(missing)} tensors are not in this '
-                             f'model, e.g. {missing[:3]} -- wrong config?')
-        sd.update(ad['adapter'])
-        model.load_state_dict(sd)
-        sup = ad.get('meta', {}).get('support', [])
-        print(f'[adapter] {len(ad["adapter"])} tensors from {a.adapter}')
-        print(f'[adapter] it was adapted on: {sup}')
-        print('[adapter] --support-coco MUST be those same images, or the '
-              'teacher and the ensemble rest on different shots')
+        apply_adapter(model, a.adapter, a.category)
     model.eval().to(a.device)
 
     preprocess = transforms.Compose([

@@ -151,6 +151,10 @@ def parse_args():
     p.add_argument('--img-dir', required=True, help='folder with the val images')
     p.add_argument('--outdir', default='viz_pred')
     p.add_argument('--per-cat', type=int, default=3, help='query images per character')
+    p.add_argument('--adapter', metavar='PATH',
+                   help='character adapter from test_tta.py --save-adapted, '
+                        'laid over --checkpoint -- this is what the deployed '
+                        'model actually is')
     p.add_argument('--support', nargs='+', metavar='FILE',
                    help='pick the support images by filename instead of letting it '
                         'choose the poses nearest each query; they must be annotated '
@@ -167,6 +171,35 @@ def parse_args():
     return p.parse_args()
 
 
+def apply_adapter(model, path, expect_category=None):
+    """Lay a character adapter from test_tta.py --save-adapted over the model.
+
+    An adapter is only the tensors adaptation moved -- the norm affines in
+    --mode norm, under 0.1% of the model -- so it is applied on top of a
+    checkpoint rather than replacing one. Shared by demo_batch, generate_pseudo
+    and test_tta so the three cannot drift apart on what "the adapted model"
+    means.
+    """
+    ad = torch.load(path, map_location='cpu')
+    if 'adapter' not in ad:
+        raise SystemExit(f'[adapter] {path} has no "adapter" key. A full '
+                         f'checkpoint goes in --checkpoint, not here.')
+    sd = model.state_dict()
+    missing = [k for k in ad['adapter'] if k not in sd]
+    if missing:
+        raise SystemExit(f'[adapter] {len(missing)} tensors are not in this '
+                         f'model, e.g. {missing[:3]} -- wrong config?')
+    sd.update(ad['adapter'])
+    model.load_state_dict(sd)
+    meta = ad.get('meta', {})
+    src = meta.get('tta', {}).get('category')
+    print(f'[adapter] {len(ad["adapter"])} tensors from {path}')
+    print(f'[adapter] fitted on: {meta.get("support", "?")}')
+    if expect_category is not None and src is not None and src != expect_category:
+        print(f'[adapter] NOTE: fitted on category {src}, used on {expect_category}')
+    return model
+
+
 def main():
     a = parse_args()
     random.seed(a.seed)
@@ -175,6 +208,8 @@ def main():
 
     model = build_posenet(cfg.model)
     load_checkpoint(model, a.checkpoint, map_location='cpu')
+    if a.adapter:
+        apply_adapter(model, a.adapter)
     model.eval().to(a.device)
 
     coco = json.load(open(a.ann))
