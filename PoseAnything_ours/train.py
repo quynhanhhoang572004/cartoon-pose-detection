@@ -165,8 +165,16 @@ def main():
     #     val_dataset.pipeline = cfg.data.train.pipeline
     #     datasets.append(build_dataset(val_dataset))
 
-    val_dataset = copy.deepcopy(cfg.data.val)
-    val_dataset = build_dataset(val_dataset, dict(test_mode=True))
+    # Only build it when it will be used. It was built unconditionally, which
+    # made --no-validate useless: the flag is read further down for
+    # train_model(validate=...), but the dataset was already constructed, so a
+    # run with no val split still died here on cfg.data.val's path -- after
+    # loading the training set and the model. train_model only touches
+    # val_dataset under `if validate:`, so None is fine.
+    val_dataset = None
+    if not args.no_validate:
+        val_dataset = build_dataset(copy.deepcopy(cfg.data.val),
+                                    dict(test_mode=True))
 
     if cfg.checkpoint_config is not None:
         # save mmpose version, config file content
