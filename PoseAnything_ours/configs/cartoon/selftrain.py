@@ -28,7 +28,11 @@ _base_ = 'train_merged_supcon.py'
 total_epochs = 20
 lr_config = dict(policy='step', warmup='linear', warmup_iters=200,
                  warmup_ratio=0.001, step=[12, 17])
-checkpoint_config = dict(interval=5)
+# Save every 5 epochs so a crash loses at most five, but keep only the newest:
+# a checkpoint here is ~716 MB and a multi-round run writes one set per round,
+# which fills a Kaggle session's 20 GB long before the rounds finish. Only the
+# last one of each round is ever used -- the loop measures `latest.pth`.
+checkpoint_config = dict(interval=5, max_keep_ckpts=1)
 evaluation = dict(interval=5, metric=['PCK', 'AUC', 'EPE'],
                   key_indicator='PCK', save_best=None,
                   gpu_collect=True, res_folder='')
