@@ -38,7 +38,14 @@ UNLAB=${UNLAB:-$ROOT/data/${NAME}_frames}                 # its unlabelled frame
 EVAL_COCO=${EVAL_COCO:-$ROOT/data/coco_$NAME.json}        # all its labelled frames
 IMGDIR=${IMGDIR:-$OUT/selftrain_images_$NAME}             # one flat dir for img_prefix
 EPOCHS=${EPOCHS:-20}
-GPU=${GPU:-0}
+GPU=${GPU:-0}                 # which GPU the single-process steps use
+GPUS=${GPUS:-1}               # processes for TRAINING only; >1 uses torch.distributed
+PORT=${PORT:-29500}           # raise it if a previous run left the port bound
+# Per-process batch, chosen so the EFFECTIVE batch stays 2 however many GPUs there
+# are. Changing the effective batch changes training dynamics, and a 2-GPU round
+# would then not be comparable with a 1-GPU one -- which defeats the point of
+# running rounds at all. Override only deliberately.
+SPG=${SPG:-$(( 2 / GPUS > 0 ? 2 / GPUS : 1 ))}
 CUMULATIVE=${CUMULATIVE:-1}   # 1: each round trains on from the last (Noisy Student).
                               # 0: each round restarts from BASE.
 MAX_PER_CAT=${MAX_PER_CAT:-}                 # set e.g. 150 for the "balanced" variant
@@ -67,6 +74,7 @@ done
   echo "         PY=/kaggle/temp/env/bin/python bash train_pseudo.sh $NAME $CAT $ROUNDS"
   exit 1; }
 echo "  ok | $ROUNDS round(s)${MAX_PER_CAT:+, merge capped at $MAX_PER_CAT/cat} | $PY"
+echo "     $PY | train on $GPUS GPU(s) x $SPG = effective batch $((GPUS * SPG))"
 
 cd "$OURS"
 # Non-fatal: every call below runs from this directory, so `import models`
@@ -152,12 +160,17 @@ for r in $(seq 1 "$ROUNDS"); do
   echo "--- d) train ($EPOCHS epochs) ---"
   [ "$CUMULATIVE" = "1" ] && START=$CKPT || START=$BASE
   echo "    starting from: $START"
-  CUDA_VISIBLE_DEVICES=$GPU "$PY" train.py \
-    --config configs/cartoon/selftrain.py --work-dir "$WORK" \
-    --cfg-options load_from="$START" total_epochs=$EPOCHS \
-      data.train.ann_file="$MERGED" \
-      data.train.img_prefix="$IMGDIR/" \
-      data.train.valid_class_ids="$IDS"
+  CFG_OPTS=(load_from="$START" total_epochs=$EPOCHS
+            data.samples_per_gpu=$SPG
+            data.train.ann_file="$MERGED"
+            data.train.img_prefix="$IMGDIR/"
+            data.train.valid_class_ids="$IDS")
+  if [ "$GPUS" -gt 1 ]; then
+    echo "    $GPUS GPUs x $SPG per GPU = effective batch $((GPUS * SPG))"
+    "$PY" -m torch.distributed.run --nproc_per_node="$GPUS" --master_port="$PORT"       train.py --config configs/cartoon/selftrain.py --work-dir "$WORK"       --launcher pytorch --cfg-options "${CFG_OPTS[@]}"
+  else
+    CUDA_VISIBLE_DEVICES=$GPU "$PY" train.py       --config configs/cartoon/selftrain.py --work-dir "$WORK"       --cfg-options "${CFG_OPTS[@]}"
+  fi
 
   echo "--- e) measure round $r ---"
   measure "$WORK/latest.pth" "$OUT/measure_${TAG}_r$r.txt"
