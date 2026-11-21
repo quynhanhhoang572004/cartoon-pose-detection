@@ -36,6 +36,12 @@ LBL_IMGS=${LBL_IMGS:-$ROOT/data/merged/images/train}
 CHR_IMGS=${CHR_IMGS:-$ROOT/data/${NAME}_eval/images}      # its labelled frames
 UNLAB=${UNLAB:-$ROOT/data/${NAME}_frames}                 # its unlabelled frames
 EVAL_COCO=${EVAL_COCO:-$ROOT/data/coco_$NAME.json}        # all its labelled frames
+# Validation during the rounds is optional: the val split holds only the
+# source characters, so it says "did we forget them", not "did the new one
+# improve". When it is missing -- which it is anywhere but the server -- train
+# with --no-validate rather than dying on a path the run does not need.
+VAL_COCO=${VAL_COCO:-$ROOT/data/merged/coco_val.json}
+VAL_IMGS=${VAL_IMGS:-$ROOT/data/merged/images/val}
 IMGDIR=${IMGDIR:-$OUT/selftrain_images_$NAME}             # one flat dir for img_prefix
 EPOCHS=${EPOCHS:-20}
 GPU=${GPU:-0}                 # which GPU the single-process steps use
@@ -165,11 +171,18 @@ for r in $(seq 1 "$ROUNDS"); do
             data.train.ann_file="$MERGED"
             data.train.img_prefix="$IMGDIR/"
             data.train.valid_class_ids="$IDS")
+  if [ -e "$VAL_COCO" ]; then
+    CFG_OPTS+=(data.val.ann_file="$VAL_COCO" data.val.img_prefix="$VAL_IMGS/")
+    NOVAL=""
+  else
+    echo "    no val set at $VAL_COCO -- training with --no-validate"
+    NOVAL="--no-validate"
+  fi
   if [ "$GPUS" -gt 1 ]; then
     echo "    $GPUS GPUs x $SPG per GPU = effective batch $((GPUS * SPG))"
-    "$PY" -m torch.distributed.run --nproc_per_node="$GPUS" --master_port="$PORT"       train.py --config configs/cartoon/selftrain.py --work-dir "$WORK"       --launcher pytorch --cfg-options "${CFG_OPTS[@]}"
+    "$PY" -m torch.distributed.run --nproc_per_node="$GPUS" --master_port="$PORT"       train.py --config configs/cartoon/selftrain.py --work-dir "$WORK"       --launcher pytorch $NOVAL --cfg-options "${CFG_OPTS[@]}"
   else
-    CUDA_VISIBLE_DEVICES=$GPU "$PY" train.py       --config configs/cartoon/selftrain.py --work-dir "$WORK"       --cfg-options "${CFG_OPTS[@]}"
+    CUDA_VISIBLE_DEVICES=$GPU "$PY" train.py       --config configs/cartoon/selftrain.py --work-dir "$WORK"       $NOVAL --cfg-options "${CFG_OPTS[@]}"
   fi
 
   echo "--- e) measure round $r ---"
